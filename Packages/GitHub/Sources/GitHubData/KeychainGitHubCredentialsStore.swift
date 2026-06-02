@@ -17,6 +17,10 @@ public final class KeychainGitHubCredentialsStore: GitHubCredentialsStore {
 
     public var organizationName: String? {
         access(keyPath: \.organizationName)
+        if let organizationName = ProcessInfo.processInfo.environment["TARTELET_GITHUB_ORGANIZATION_NAME"]
+            ?? UserDefaults.standard.string(forKey: "gitHubOrganizationName") {
+            return organizationName
+        }
         return keychain.password(
             forAccount: PasswordAccount.organizationName,
             belongingToService: serviceName
@@ -24,6 +28,10 @@ public final class KeychainGitHubCredentialsStore: GitHubCredentialsStore {
     }
     public var repositoryName: String? {
         access(keyPath: \.repositoryName)
+        if let repositoryName = ProcessInfo.processInfo.environment["TARTELET_GITHUB_REPOSITORY_NAME"]
+            ?? UserDefaults.standard.string(forKey: "gitHubRepositoryName") {
+            return repositoryName
+        }
         return keychain.password(
             forAccount: PasswordAccount.repositoryName,
             belongingToService: serviceName
@@ -31,6 +39,10 @@ public final class KeychainGitHubCredentialsStore: GitHubCredentialsStore {
     }
     public var ownerName: String? {
         access(keyPath: \.ownerName)
+        if let ownerName = ProcessInfo.processInfo.environment["TARTELET_GITHUB_OWNER_NAME"]
+            ?? UserDefaults.standard.string(forKey: "gitHubOwnerName") {
+            return ownerName
+        }
         return keychain.password(
             forAccount: PasswordAccount.ownerName,
             belongingToService: serviceName
@@ -38,6 +50,10 @@ public final class KeychainGitHubCredentialsStore: GitHubCredentialsStore {
     }
     public var appId: String? {
         access(keyPath: \.appId)
+        if let appId = ProcessInfo.processInfo.environment["TARTELET_GITHUB_APP_ID"]
+            ?? UserDefaults.standard.string(forKey: "gitHubAppId") {
+            return appId
+        }
         return keychain.password(
             forAccount: PasswordAccount.appId,
             belongingToService: serviceName
@@ -45,6 +61,11 @@ public final class KeychainGitHubCredentialsStore: GitHubCredentialsStore {
     }
     public var privateKey: Data? {
         access(keyPath: \.privateKey)
+        let privateKeyPath = ProcessInfo.processInfo.environment["TARTELET_GITHUB_PRIVATE_KEY_PATH"]
+            ?? UserDefaults.standard.string(forKey: "gitHubPrivateKeyPath")
+        if let privateKeyPath, let privateKey = try? Data(contentsOf: URL(fileURLWithPath: privateKeyPath)) {
+            return privateKey
+        }
         return keychain.key(withTag: KeyTag.privateKey)?.data
     }
 

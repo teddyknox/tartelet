@@ -114,7 +114,9 @@ cd \\$ACTIONS_RUNNER_DIRECTORY
 EOF
 """)
         try await connection.executeCommand("chmod +x \(startRunnerScriptFilePath)")
-        try await connection.executeCommand("open -a Terminal \(startRunnerScriptFilePath)")
+        try await connection.executeCommand("""
+nohup \(startRunnerScriptFilePath) > ~/start-runner.log 2>&1 < /dev/null &
+""")
     }
     private func runnerName(for virtualMachine: VirtualMachine) -> String {
         let configuredRunnerName = configuration.runnerName

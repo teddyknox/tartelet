@@ -49,7 +49,7 @@ public struct VirtualMachineSSHClient<SSHClientType: SSHClient> {
         let connection = try await connectToVirtualMachine(
             named: virtualMachine.name,
             on: ipAddress,
-            maximumAttempts: 3
+            maximumAttempts: sshConnectionMaximumAttempts
         )
         try await connectionHandler.didConnect(to: virtualMachine, through: connection)
         return connection
@@ -57,6 +57,14 @@ public struct VirtualMachineSSHClient<SSHClientType: SSHClient> {
 }
 
 private extension VirtualMachineSSHClient {
+    private var sshConnectionMaximumAttempts: Int {
+        let environmentValue = ProcessInfo.processInfo.environment["TARTELET_SSH_CONNECTION_MAXIMUM_ATTEMPTS"]
+            .flatMap(Int.init)
+        let settingsValue = UserDefaults.standard.integer(forKey: "sshConnectionMaximumAttempts")
+        let value = environmentValue ?? settingsValue
+        return value > 0 ? value : 30
+    }
+
     private func getIPAddress(of virtualMachine: VirtualMachine) async throws -> String {
         do {
             return try await ipAddressReader.readIPAddress(of: virtualMachine)

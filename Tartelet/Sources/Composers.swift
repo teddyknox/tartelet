@@ -1,3 +1,4 @@
+import Foundation
 import FileSystemData
 import GitHubData
 import GitHubDomain
@@ -94,6 +95,9 @@ enum Composers {
 
 private extension Composers {
     private static func keychain(logger: Logger) -> Keychain {
-        Keychain(logger: logger, accessGroup: "566MC7D8D4.dk.shape.Tartelet")
+        let shouldDisableAccessGroup = ProcessInfo.processInfo.environment["TARTELET_DISABLE_KEYCHAIN_ACCESS_GROUP"] == "1"
+            || UserDefaults.standard.bool(forKey: "disableKeychainAccessGroup")
+        let accessGroup = shouldDisableAccessGroup ? nil : "566MC7D8D4.dk.shape.Tartelet"
+        return Keychain(logger: logger, accessGroup: accessGroup)
     }
 }

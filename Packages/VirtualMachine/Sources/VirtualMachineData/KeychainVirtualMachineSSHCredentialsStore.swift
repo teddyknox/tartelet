@@ -11,11 +11,19 @@ public final class KeychainVirtualMachineSSHCredentialsStore: VirtualMachineSSHC
 
     public var username: String? {
         access(keyPath: \.username)
+        if let username = ProcessInfo.processInfo.environment["TARTELET_SSH_USERNAME"]
+            ?? UserDefaults.standard.string(forKey: "virtualMachineSSHUsername") {
+            return username
+        }
         return keychain.password(forAccount: PasswordAccount.username, belongingToService: serviceName)
     }
 
     public var password: String? {
         access(keyPath: \.password)
+        if let password = ProcessInfo.processInfo.environment["TARTELET_SSH_PASSWORD"]
+            ?? UserDefaults.standard.string(forKey: "virtualMachineSSHPassword") {
+            return password
+        }
         return keychain.password(forAccount: PasswordAccount.password, belongingToService: serviceName)
     }
 
