@@ -33,7 +33,7 @@ struct TarteletApp: App {
                     homeProvider: SettingsTartHomeProvider(
                         settingsStore: Composers.settingsStore
                     ),
-                    shell: ProcessShell()
+                    shell: ProcessShell(processRegistry: Composers.processRegistry)
                 )
             ),
             logExporter: FileLogExporter(

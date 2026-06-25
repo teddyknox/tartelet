@@ -2,7 +2,11 @@ import Foundation
 import ShellDomain
 
 public struct ProcessShell: Shell {
-    public init() {}
+    private let processRegistry: ProcessRegistry?
+
+    public init(processRegistry: ProcessRegistry? = nil) {
+        self.processRegistry = processRegistry
+    }
 
     public func runExecutable(
         atPath executablePath: String,
@@ -19,6 +23,10 @@ public struct ProcessShell: Shell {
             process.standardInput = nil
             process.environment = environment
             try process.run()
+            // Track the running process so the app can terminate it (and the virtual machine it
+            // manages) when quitting, instead of leaking it. See `ProcessRegistry`.
+            processRegistry?.register(sendableProcess)
+            defer { processRegistry?.unregister(sendableProcess) }
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
             // Explicitly close the pipe file handle to prevent running out of file descriptors.
             // See https://github.com/swiftlang/swift/issues/57827
@@ -29,8 +37,10 @@ public struct ProcessShell: Shell {
             }
             return String(data: data, encoding: .utf8) ?? ""
         } onCancel: {
+            // Send `SIGINT` (as Ctrl-C would) rather than `SIGTERM` so `tart` shuts its virtual
+            // machine down cleanly instead of being killed and leaking the machine.
             if sendableProcess.process.isRunning {
-                sendableProcess.process.terminate()
+                sendableProcess.process.interrupt()
             }
         }
     }

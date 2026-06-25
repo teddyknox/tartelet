@@ -7,3 +7,13 @@ final class SendableProcess: @unchecked Sendable {
         self.process = process
     }
 }
+
+extension SendableProcess: Hashable {
+    static func == (lhs: SendableProcess, rhs: SendableProcess) -> Bool {
+        lhs === rhs
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(ObjectIdentifier(self))
+    }
+}
