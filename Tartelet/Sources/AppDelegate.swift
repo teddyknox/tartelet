@@ -12,6 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Route SIGTERM/SIGINT through a regular quit so virtual machines are torn down instead of
+        // being leaked when the app is killed by a signal rather than quit gracefully.
+        TerminationSignalHandler.install {
+            NSApplication.shared.terminate(nil)
+        }
         beginObservingAppIconVisibility()
         if Composers.settingsStore.startVirtualMachinesOnLaunch {
             Composers.fleet.start(numberOfMachines: Composers.settingsStore.numberOfVirtualMachines)
@@ -32,7 +37,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         Composers.editor.stop()
-        Composers.fleet.stop()
+        // Cancel the fleet's running tasks so they stop relaunching virtual machines, then
+        // interrupt the spawned `tart` processes and wait for them to exit. This gives `tart` a
+        // chance to shut its virtual machines down cleanly instead of leaking them when we quit.
+        // Reached on a graceful quit, logout and restart, and — via `TerminationSignalHandler` —
+        // on `SIGTERM`/`SIGINT`. A crash or `SIGKILL` cannot be handled here.
+        Composers.fleet.stopImmediately()
+        Composers.processRegistry.terminateAll()
     }
 }
 

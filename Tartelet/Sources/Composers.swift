@@ -16,6 +16,8 @@ import VirtualMachineDomain
 enum Composers {
     static let settingsStore = AppStorageSettingsStore()
 
+    static let processRegistry = ProcessRegistry()
+
     static let fleet = VirtualMachineFleet(
         logger: logger(subsystem: "VirtualMachineFleet"),
         baseVirtualMachine: SSHConnectingVirtualMachine(
@@ -25,7 +27,7 @@ enum Composers {
                     homeProvider: SettingsTartHomeProvider(
                         settingsStore: settingsStore
                     ),
-                    shell: ProcessShell()
+                    shell: ProcessShell(processRegistry: processRegistry)
                 ),
                 settingsStore: settingsStore
             ),
@@ -63,7 +65,7 @@ enum Composers {
                 homeProvider: SettingsTartHomeProvider(
                     settingsStore: settingsStore
                 ),
-                shell: ProcessShell()
+                shell: ProcessShell(processRegistry: processRegistry)
             ),
             settingsStore: settingsStore
         )
