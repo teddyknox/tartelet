@@ -1,5 +1,5 @@
-import Foundation
 import FileSystemData
+import Foundation
 import GitHubData
 import GitHubDomain
 import Keychain
@@ -27,35 +27,22 @@ enum Composers {
                     homeProvider: SettingsTartHomeProvider(
                         settingsStore: settingsStore
                     ),
-                    shell: ProcessShell(processRegistry: processRegistry)
+                    shell: ProcessShell(processRegistry: processRegistry),
+                    logger: logger(subsystem: "Tart")
                 ),
                 settingsStore: settingsStore
             ),
-            sshClient: VirtualMachineSSHClient(
-                logger: logger(subsystem: "VirtualMachineSSHClient"),
-                client: CitadelSSHClient(
-                    logger: logger(subsystem: "CitadelSSHClient")
-                ),
-                ipAddressReader: RetryingVirtualMachineIPAddressReader(),
-                credentialsStore: virtualMachineSSHCredentialsStore,
-                connectionHandler: CompositeVirtualMachineSSHConnectionHandler([
-                    PostBootScriptSSHConnectionHandler(),
-                    GitHubActionsRunnerSSHConnectionHandler(
-                        logger: logger(subsystem: "GitHubActionsRunnerSSHConnectionHandler"),
-                        client: NetworkingGitHubClient(
-                            credentialsStore: gitHubCredentialsStore,
-                            networkingService: URLSessionNetworkingService(
-                                logger: logger(subsystem: "URLSessionNetworkingService")
-                            )
-                        ),
-                        credentialsStore: gitHubCredentialsStore,
-                        configuration: SettingsGitHubActionsRunnerConfiguration(
-                            settingsStore: settingsStore
-                        )
-                    )
-                ])
-            )
-        )
+            sshClient: virtualMachineSSHClient
+        ),
+        runnerRegistry: GitHubClientActionsRunnerRegistry(
+            client: gitHubClient,
+            configuration: gitHubActionsRunnerConfiguration
+        ),
+        runnerConfiguration: gitHubActionsRunnerConfiguration,
+        guestLogReader: SSHVirtualMachineGuestLogReader(
+            sshClient: virtualMachineSSHClient
+        ),
+        policy: FleetSlotPolicy.fromEnvironment()
     )
 
     static let editor = VirtualMachineEditor(
@@ -65,7 +52,8 @@ enum Composers {
                 homeProvider: SettingsTartHomeProvider(
                     settingsStore: settingsStore
                 ),
-                shell: ProcessShell(processRegistry: processRegistry)
+                shell: ProcessShell(processRegistry: processRegistry),
+                logger: logger(subsystem: "Tart")
             ),
             settingsStore: settingsStore
         )
@@ -85,6 +73,35 @@ enum Composers {
         serviceName: "Tartelet Virtual Machine SSH Credentials"
     )
 
+    static let gitHubClient = NetworkingGitHubClient(
+        credentialsStore: gitHubCredentialsStore,
+        networkingService: URLSessionNetworkingService(
+            logger: logger(subsystem: "URLSessionNetworkingService")
+        )
+    )
+
+    static let gitHubActionsRunnerConfiguration = SettingsGitHubActionsRunnerConfiguration(
+        settingsStore: settingsStore
+    )
+
+    static let virtualMachineSSHClient = VirtualMachineSSHClient(
+        logger: logger(subsystem: "VirtualMachineSSHClient"),
+        client: CitadelSSHClient(
+            logger: logger(subsystem: "CitadelSSHClient")
+        ),
+        ipAddressReader: RetryingVirtualMachineIPAddressReader(),
+        credentialsStore: virtualMachineSSHCredentialsStore,
+        connectionHandler: CompositeVirtualMachineSSHConnectionHandler([
+            PostBootScriptSSHConnectionHandler(),
+            GitHubActionsRunnerSSHConnectionHandler(
+                logger: logger(subsystem: "GitHubActionsRunnerSSHConnectionHandler"),
+                client: gitHubClient,
+                credentialsStore: gitHubCredentialsStore,
+                configuration: gitHubActionsRunnerConfiguration
+            )
+        ])
+    )
+
     static func logger(subsystem: String) -> Logger {
         FileLogger(
             fileSystem: DiskFileSystem(),
@@ -97,7 +114,8 @@ enum Composers {
 
 private extension Composers {
     private static func keychain(logger: Logger) -> Keychain {
-        let shouldDisableAccessGroup = ProcessInfo.processInfo.environment["TARTELET_DISABLE_KEYCHAIN_ACCESS_GROUP"] == "1"
+        let environment = ProcessInfo.processInfo.environment
+        let shouldDisableAccessGroup = environment["TARTELET_DISABLE_KEYCHAIN_ACCESS_GROUP"] == "1"
             || UserDefaults.standard.bool(forKey: "disableKeychainAccessGroup")
         let accessGroup = shouldDisableAccessGroup ? nil : "566MC7D8D4.dk.shape.Tartelet"
         return Keychain(logger: logger, accessGroup: accessGroup)

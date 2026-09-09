@@ -54,6 +54,15 @@ public struct VirtualMachineSSHClient<SSHClientType: SSHClient> {
         try await connectionHandler.didConnect(to: virtualMachine, through: connection)
         return connection
     }
+
+    /// Connects in a single attempt without running the connection handler.
+    ///
+    /// For diagnostics on a guest that has already been bootstrapped, where re-running the
+    /// bootstrap would be wrong and retrying for minutes would defeat the purpose.
+    func openConnection(to virtualMachine: VirtualMachine) async throws -> SSHClientType.SSHConnectionType {
+        let ipAddress = try await virtualMachine.getIPAddress()
+        return try await connectToVirtualMachine(named: virtualMachine.name, on: ipAddress)
+    }
 }
 
 private extension VirtualMachineSSHClient {

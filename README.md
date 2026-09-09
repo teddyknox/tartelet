@@ -35,6 +35,32 @@ Tartelet uses Tart for managing the virtual machines and Tart which in turn uses
 
 After the last step the process starts over.
 
+## 🐕 Fleet watchdog
+
+The lifecycle above assumes every virtual machine eventually powers itself off. In practice a guest can wedge: a job cancelled from GitHub can leave `xcodebuild` and the simulator running so `sudo shutdown -h now` never completes, or a fresh clone can boot without ever registering its runner. Without help from the host that slot is dead until someone kills processes by hand. This fork therefore watches every slot from the host and recycles it when it misses a deadline.
+
+Each slot moves through an explicit state machine: `idle → cloning → booting → bootstrapped → registered → busy → draining → exited`. The host learns about `bootstrapped` from its own SSH bootstrap and about `registered`, `busy` and `draining` by polling GitHub's runner list (`GET /orgs/{org}/actions/runners` or `GET /repos/{owner}/{repo}/actions/runners`) with the app installation token, matching the exact runner name of the slot. Deadlines are enforced on the host:
+
+| State | Deadline | Default | Environment variable |
+| --- | --- | --- | --- |
+| `booting` | the SSH bootstrap must complete | 5 min | `TARTELET_BOOT_TIMEOUT` |
+| `bootstrapped` | the runner must appear online in GitHub's list | 5 min | `TARTELET_REGISTRATION_TIMEOUT` |
+| `draining` | `tart run` must return once the runner has unregistered, or gone offline after a job | 3 min | `TARTELET_SHUTDOWN_TIMEOUT` |
+| any | hard cap on the life of one clone, the last resort; must exceed the longest job | 3 h | `TARTELET_MAX_LIFETIME` |
+
+Two more knobs tune the cadence: `TARTELET_RUNNER_POLL_INTERVAL` (default 30 s) sets how often the runner list is polled, and `TARTELET_RETRY_DELAY` (default 10 s) is the pause after a cycle that failed to clone or start. All values are whole seconds. Each variable falls back to a `UserDefaults` key with the same meaning (`bootTimeout`, `registrationTimeout`, `shutdownTimeout`, `maxLifetime`, `runnerPollInterval`, `retryDelay`) and then to the default. Transient failures of the GitHub API never trip a deadline: the registration deadline only counts observations that actually succeeded, and the other deadlines do not depend on the API at all.
+
+When a deadline trips the slot enters `recovering` and, in order:
+
+1. fetches the tail of `~/start-runner.log` and a process snapshot from the guest over SSH (best effort, bounded) and writes them to the host log, so the guest-side cause is visible;
+2. runs `tart stop <name>` with a short timeout, then interrupts and, if necessary, kills its own `tart run` process, then kills a Virtualization helper that still holds the clone's disk image;
+3. runs `tart delete`, and removes `~/.tart/vms/<name>` itself if it still exists, including when `tart delete` claims the machine does not exist (a directory without `config.json`, which would otherwise make the next clone into that name boot a broken machine);
+4. clones again.
+
+Cloning also cleans a slot that was left behind, stopping an orphaned `tart run` first, so the fleet recovers after a crash as well. Every state transition and every deadline trip is logged at info level with the slot name and the time spent, and the menu bar lists each slot with its state while the fleet is running.
+
+Inside the guest, the runner script's `EXIT` trap now kills the runner's process tree and any simulator or `xcodebuild` a cancelled job left behind before requesting `sudo shutdown -h now`, and falls back to `sudo halt -q` if the shutdown has not completed within 90 seconds.
+
 ## 🏎 How is the performance?
 
 The performance depends on the hardware that the app is running on. When testing on a Mac mini M1 from 2020 with 16 GB memory, we found that our jobs run 3 - 4 times faster than on GitHub's runners.

@@ -52,13 +52,13 @@ public final class SSHConnectingVirtualMachine<SSHClientType: SSHClient>: Virtua
         self.sshClient = sshClient
     }
 
-    public func start() async throws {
+    public func start(observer: VirtualMachineStartObserver?) async throws {
         try await withThrowingTaskGroup(of: StartVirtualMachineResult.self) { group in
             group.addTask {
                 return try await self.startVirtualMachine()
             }
             group.addTask {
-                return try await self.connect(to: self.virtualMachine)
+                return try await self.connect(to: self.virtualMachine, observer: observer)
             }
             for try await result in group {
                 switch result {
@@ -105,12 +105,17 @@ public final class SSHConnectingVirtualMachine<SSHClientType: SSHClient>: Virtua
     public func getIPAddress() async throws -> String {
         try await virtualMachine.getIPAddress()
     }
+
+    public func forceStop() async {
+        await virtualMachine.forceStop()
+    }
 }
 
 private extension SSHConnectingVirtualMachine {
     private func startVirtualMachine() async throws -> StartVirtualMachineResult {
         do {
-            try await self.virtualMachine.start()
+            // The bootstrap milestone is this layer's to report, so the inner machine gets no observer.
+            try await self.virtualMachine.start(observer: nil)
             return .success(.virtualMachineTerminated)
         } catch {
             if error is CancellationError {
@@ -121,10 +126,14 @@ private extension SSHConnectingVirtualMachine {
         }
     }
 
-    private func connect(to virtualMachine: VirtualMachine) async throws -> StartVirtualMachineResult {
+    private func connect(
+        to virtualMachine: VirtualMachine,
+        observer: VirtualMachineStartObserver?
+    ) async throws -> StartVirtualMachineResult {
         do {
             let connection = try await sshClient.connect(to: virtualMachine)
             try await connection.close()
+            observer?.virtualMachineDidBootstrap(self)
             return .success(.sshConnectionCompleted)
         } catch {
             if error is CancellationError {

@@ -1,3 +1,4 @@
+import Foundation
 import SettingsDomain
 import SwiftUI
 import VirtualMachineDomain
@@ -11,6 +12,7 @@ struct VirtualMachinesMenuContent: View {
 
     let configurationState: ConfigurationState
     let virtualMachineState: VirtualMachineState
+    let slotStatuses: [VirtualMachineFleetSlotStatus]
     let onSelect: (Action) -> Void
 
     var body: some View {
@@ -24,6 +26,9 @@ struct VirtualMachinesMenuContent: View {
                 onSelect(.stopFleet)
             }
         )
+        if !slotStatuses.isEmpty {
+            FleetSlotsMenuItems(slotStatuses: slotStatuses, now: Date())
+        }
         Divider()
         EditorMenuBarItem(
             configurationState: configurationState,

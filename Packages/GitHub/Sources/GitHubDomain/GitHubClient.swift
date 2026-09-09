@@ -10,4 +10,9 @@ public protocol GitHubClient {
         with appAccessToken: GitHubAppAccessToken,
         runnerScope: GitHubRunnerScope
     ) async throws -> URL
+    /// Lists every self-hosted runner registered in the scope, following pagination.
+    func getRunners(
+        with appAccessToken: GitHubAppAccessToken,
+        runnerScope: GitHubRunnerScope
+    ) async throws -> [GitHubRunner]
 }

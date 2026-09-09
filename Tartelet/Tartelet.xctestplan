@@ -14,16 +14,16 @@
   "testTargets" : [
     {
       "target" : {
-        "containerPath" : "container:Packages\/Logging",
-        "identifier" : "LogExporterLiveTests",
-        "name" : "LogExporterLiveTests"
+        "containerPath" : "container:Packages\/VirtualMachine",
+        "identifier" : "VirtualMachineDomainTests",
+        "name" : "VirtualMachineDomainTests"
       }
     },
     {
       "target" : {
-        "containerPath" : "container:Packages\/VirtualMachineAutomaticLauncher",
-        "identifier" : "VirtualMachineAutomaticLauncherTests",
-        "name" : "VirtualMachineAutomaticLauncherTests"
+        "containerPath" : "container:Packages\/VirtualMachine",
+        "identifier" : "VirtualMachineDataTests",
+        "name" : "VirtualMachineDataTests"
       }
     }
   ],

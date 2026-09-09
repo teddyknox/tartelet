@@ -10,6 +10,7 @@ private enum NetworkingGitHubClientError: LocalizedError {
     case privateKeyUnavailable
     case appIsNotInstalled
     case downloadNotFound(os: String, architecture: String)
+    case invalidRunnersURL
 
     var errorDescription: String? {
         switch self {
@@ -27,6 +28,8 @@ private enum NetworkingGitHubClientError: LocalizedError {
             return "The GitHub app has not been installed. Please install it from the developer settings."
         case let .downloadNotFound(os, architecture):
             return "Could not find a download for \(os) (\(architecture))"
+        case .invalidRunnersURL:
+            return "Could not build the URL for listing runners"
         }
     }
 }
@@ -89,9 +92,43 @@ public final class NetworkingGitHubClient: GitHubClient {
             GitHubRunnerRegistrationToken(parameters.value.token)
         }
     }
+
+    public func getRunners(
+        with appAccessToken: GitHubAppAccessToken,
+        runnerScope: GitHubRunnerScope
+    ) async throws -> [GitHubRunner] {
+        let path = try await runnerScope.runnersPath(using: credentialsStore)
+        var components = URLComponents(url: baseURL.appending(path: path), resolvingAgainstBaseURL: false)
+        components?.queryItems = [URLQueryItem(name: "per_page", value: "100")]
+        guard var pageURL = components?.url else {
+            throw NetworkingGitHubClientError.invalidRunnersURL
+        }
+        var runners: [GitHubRunner] = []
+        // GitHub paginates with a `Link` header. Bound the walk so a misbehaving server can't keep us here.
+        for _ in 0 ..< Self.maximumRunnerPages {
+            let request = URLRequest(url: pageURL).addingBearerToken(appAccessToken.rawValue)
+            let response = await networkingService.load(GitHubRunnerListPage.self, from: request)
+            let page = try response.map(\.value)
+            runners += page.runners.map { runner in
+                GitHubRunner(
+                    id: runner.id,
+                    name: runner.name,
+                    isOnline: runner.status == "online",
+                    isBusy: runner.busy
+                )
+            }
+            guard let nextPageURL = response.httpURLResponse?.nextPageURL else {
+                return runners
+            }
+            pageURL = nextPageURL
+        }
+        return runners
+    }
 }
 
 private extension NetworkingGitHubClient {
+    private static let maximumRunnerPages = 50
+
     private func getAppInstallation(runnerScope: GitHubRunnerScope) async throws -> GitHubAppInstallation {
         let url = baseURL.appending(path: "/app/installations")
         let token = try await getAppJWTToken()
@@ -164,6 +201,24 @@ private extension GitHubRunnerScope {
         }
     }
 
+    func runnersPath(using credentialsStore: GitHubCredentialsStore) async throws -> String {
+        switch self {
+        case .organization:
+            guard let organizationName = credentialsStore.organizationName else {
+                throw NetworkingGitHubClientError.organizationNameUnavailable
+            }
+            return "/orgs/\(organizationName)/actions/runners"
+        case .repo:
+            guard let repositoryName = credentialsStore.repositoryName else {
+                throw NetworkingGitHubClientError.repositoryNameUnavailable
+            }
+            guard let ownerName = credentialsStore.ownerName else {
+                throw NetworkingGitHubClientError.repositoryOwnerNameUnavailable
+            }
+            return "/repos/\(ownerName)/\(repositoryName)/actions/runners"
+        }
+    }
+
     func runnerLogin(using credentialsStore: GitHubCredentialsStore) async -> String? {
         switch self {
         case .organization:
@@ -171,5 +226,27 @@ private extension GitHubRunnerScope {
         case .repo:
             return credentialsStore.ownerName
         }
+    }
+}
+
+private extension HTTPURLResponse {
+    /// The `rel="next"` URL of a `Link` header, e.g.
+    /// `<https://api.github.com/repositories/1/actions/runners?per_page=100&page=2>; rel="next", <...>; rel="last"`.
+    var nextPageURL: URL? {
+        guard let link = value(forHTTPHeaderField: "Link") else {
+            return nil
+        }
+        for entry in link.split(separator: ",") {
+            let parts = entry.split(separator: ";").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard parts.count >= 2, parts.dropFirst().contains(where: { $0 == "rel=\"next\"" }) else {
+                continue
+            }
+            let target = parts[0]
+            guard target.hasPrefix("<"), target.hasSuffix(">") else {
+                continue
+            }
+            return URL(string: String(target.dropFirst().dropLast()))
+        }
+        return nil
     }
 }
