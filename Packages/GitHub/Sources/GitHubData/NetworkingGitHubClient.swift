@@ -11,6 +11,7 @@ private enum NetworkingGitHubClientError: LocalizedError {
     case appIsNotInstalled
     case downloadNotFound(os: String, architecture: String)
     case invalidRunnersURL
+    case incompleteRunnerList
 
     var errorDescription: String? {
         switch self {
@@ -30,6 +31,8 @@ private enum NetworkingGitHubClientError: LocalizedError {
             return "Could not find a download for \(os) (\(architecture))"
         case .invalidRunnersURL:
             return "Could not build the URL for listing runners"
+        case .incompleteRunnerList:
+            return "The runner list exceeded the pagination limit; the observation is incomplete"
         }
     }
 }
@@ -122,7 +125,7 @@ public final class NetworkingGitHubClient: GitHubClient {
             }
             pageURL = nextPageURL
         }
-        return runners
+        throw NetworkingGitHubClientError.incompleteRunnerList
     }
 }
 

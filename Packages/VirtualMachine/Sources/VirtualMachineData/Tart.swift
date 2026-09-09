@@ -29,7 +29,7 @@ public struct Tart {
         guard let homeFolderURL = homeProvider.homeFolderURL else {
             return nil
         }
-        return ["TART_HOME": homeFolderURL.path(percentEncoded: false)]
+        return ["TART_HOME": homeFolderURL.path]
     }
 
     public init(homeProvider: TartHomeProvider, shell: Shell, logger: Logger? = nil) {
@@ -57,7 +57,7 @@ public struct Tart {
     }
 
     public func clone(sourceName: String, newName: String) async throws {
-        try await executeCommand(withArguments: ["clone", sourceName, newName])
+        try await executeCommand(withArguments: ["clone", sourceName, newName], timeout: .seconds(600))
     }
 
     /// Launches `tart run` and returns without waiting for it. The process exits when the guest powers off.
@@ -78,7 +78,7 @@ public struct Tart {
     public func stop(name: String, timeout: Duration) async throws {
         let seconds = max(1, Int(timeout.components.seconds))
         do {
-            try await executeCommand(withArguments: ["stop", name, "--timeout", String(seconds)])
+            try await executeCommand(withArguments: ["stop", name, "--timeout", String(seconds)], timeout: .seconds(45))
         } catch {
             throw Self.mapError(error, virtualMachineName: name)
         }
@@ -99,7 +99,7 @@ public struct Tart {
 
     public func getIPAddress(ofVirtualMachineNamed name: String) async throws -> String {
         do {
-            let result = try await executeCommand(withArguments: ["ip", name])
+            let result = try await executeCommand(withArguments: ["ip", name], timeout: .seconds(15))
             return result.trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
             throw Self.mapError(error, virtualMachineName: name)
@@ -107,8 +107,16 @@ public struct Tart {
     }
 }
 
-private extension Tart {
-    private func executablePath() throws -> String {
+extension Tart {
+    /// A running cycle must not follow a settings change to another home directory.
+    func frozen() -> Tart {
+        Tart(homeProvider: FixedHome(homeFolderURL: homeFolderURL.resolvingSymlinksInPath()),
+             shell: shell, logger: logger, executablePath: executablePathOverride)
+    }
+
+    private struct FixedHome: TartHomeProvider { let homeFolderURL: URL? }
+
+    func executablePath() throws -> String {
         if let executablePathOverride {
             return executablePathOverride
         }
@@ -116,18 +124,22 @@ private extension Tart {
     }
 
     @discardableResult
-    private func executeCommand(withArguments arguments: [String]) async throws -> String {
+    private func executeCommand(
+        withArguments arguments: [String], timeout: Duration = .seconds(60)
+    ) async throws -> String {
         let filePath = try executablePath()
         if let environment {
             return try await shell.runExecutable(
                 atPath: filePath,
                 withArguments: arguments,
-                environment: environment
+                environment: environment,
+                timeout: timeout
             )
         } else {
             return try await shell.runExecutable(
                 atPath: filePath,
-                withArguments: arguments
+                withArguments: arguments,
+                timeout: timeout
             )
         }
     }

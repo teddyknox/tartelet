@@ -63,12 +63,19 @@ final class FleetSlotHarness {
     /// Wakes the watchdog for one poll and waits until it has dealt with it: it is either asleep
     /// again or the cycle has ended.
     func tick(_ slot: VirtualMachineFleetSlot) async throws {
-        try await clock.advanceWhenSleeping(by: 30)
-        try await waitUntil("the watchdog to settle") { self.clock.sleeperCount > 0 || slot.status.state == .idle }
+        let generation = try await clock.advanceWhenSleeping(by: 30)
+        try await waitUntil("the watchdog to settle") {
+            self.clock.sleepGeneration > generation || slot.status.state == .idle
+        }
     }
 
     func waitForState(_ slot: VirtualMachineFleetSlot, _ state: FleetSlotState) async throws {
         try await waitUntil("state \(state.rawValue)") { slot.status.state == state }
+        if state == .booting {
+            try await waitUntil("start observer to be installed") {
+                self.recorder.clones.last?.hasStarted == true
+            }
+        }
     }
 
     func waitUntil(

@@ -13,18 +13,12 @@ public struct ProcessShell: Shell {
         withArguments arguments: [String],
         environment: [String: String]
     ) async throws -> String {
-        let process = try launchProcess(
+        try await runExecutable(
             atPath: executablePath,
             withArguments: arguments,
-            environment: environment
+            environment: environment,
+            timeout: .seconds(60)
         )
-        return try await withTaskCancellationHandler {
-            try await process.waitForExit()
-        } onCancel: {
-            // Send `SIGINT` (as Ctrl-C would) rather than `SIGTERM` so `tart` shuts its virtual
-            // machine down cleanly instead of being killed and leaking the machine.
-            process.interrupt()
-        }
     }
 
     public func launchExecutable(

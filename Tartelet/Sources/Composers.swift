@@ -13,10 +13,12 @@ import SSHData
 import VirtualMachineData
 import VirtualMachineDomain
 
+@MainActor
 enum Composers {
     static let settingsStore = AppStorageSettingsStore()
 
     static let processRegistry = ProcessRegistry()
+    static let fleetPolicy = FleetSlotPolicy.fromEnvironment()
 
     static let fleet = VirtualMachineFleet(
         logger: logger(subsystem: "VirtualMachineFleet"),
@@ -32,17 +34,26 @@ enum Composers {
                 ),
                 settingsStore: settingsStore
             ),
-            sshClient: virtualMachineSSHClient
+            sshClient: virtualMachineSSHClient,
+            bootstrapTimeout: fleetPolicy.bootTimeout
         ),
         runnerRegistry: GitHubClientActionsRunnerRegistry(
-            client: gitHubClient,
+            // The slot reports and throttles polling failures. Avoid a second transport log
+            // on every poll; bootstrap requests retain the ordinary client's diagnostics.
+            client: NetworkingGitHubClient(
+                credentialsStore: gitHubCredentialsStore,
+                networkingService: URLSessionNetworkingService(
+                    logger: logger(subsystem: "RunnerRegistryNetworking"),
+                    logsFailures: false
+                )
+            ),
             configuration: gitHubActionsRunnerConfiguration
         ),
         runnerConfiguration: gitHubActionsRunnerConfiguration,
         guestLogReader: SSHVirtualMachineGuestLogReader(
             sshClient: virtualMachineSSHClient
         ),
-        policy: FleetSlotPolicy.fromEnvironment()
+        policy: fleetPolicy
     )
 
     static let editor = VirtualMachineEditor(

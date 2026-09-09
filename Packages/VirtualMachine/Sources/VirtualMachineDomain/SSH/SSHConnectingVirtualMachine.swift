@@ -41,15 +41,18 @@ public final class SSHConnectingVirtualMachine<SSHClientType: SSHClient>: Virtua
     private let logger: Logger
     private let virtualMachine: VirtualMachine
     private let sshClient: VirtualMachineSSHClient<SSHClientType>
+    private let bootstrapTimeout: Duration
 
     public init(
         logger: Logger,
         virtualMachine: VirtualMachine,
-        sshClient: VirtualMachineSSHClient<SSHClientType>
+        sshClient: VirtualMachineSSHClient<SSHClientType>,
+        bootstrapTimeout: Duration = .seconds(300)
     ) {
         self.logger = logger
         self.virtualMachine = virtualMachine
         self.sshClient = sshClient
+        self.bootstrapTimeout = bootstrapTimeout
     }
 
     public func start(observer: VirtualMachineStartObserver?) async throws {
@@ -94,7 +97,8 @@ public final class SSHConnectingVirtualMachine<SSHClientType: SSHClient>: Virtua
         return SSHConnectingVirtualMachine(
             logger: logger,
             virtualMachine: virtualMachine,
-            sshClient: sshClient
+            sshClient: sshClient,
+            bootstrapTimeout: bootstrapTimeout
         )
     }
 
@@ -131,9 +135,14 @@ private extension SSHConnectingVirtualMachine {
         observer: VirtualMachineStartObserver?
     ) async throws -> StartVirtualMachineResult {
         do {
-            let connection = try await sshClient.connect(to: virtualMachine)
-            try await connection.close()
-            observer?.virtualMachineDidBootstrap(self)
+            // The complete bootstrap is bounded, including IP lookup, authentication, all
+            // handlers and close. Task-group cancellation never joins cancellation-ignoring SSH.
+            try await withTimeout(bootstrapTimeout) { [self] in
+                let connection = try await sshClient.connect(to: virtualMachine)
+                try await withTimeout(.seconds(5)) { try await connection.close() }
+                try Task.checkCancellation()
+                observer?.virtualMachineDidBootstrap(self)
+            }
             return .success(.sshConnectionCompleted)
         } catch {
             if error is CancellationError {

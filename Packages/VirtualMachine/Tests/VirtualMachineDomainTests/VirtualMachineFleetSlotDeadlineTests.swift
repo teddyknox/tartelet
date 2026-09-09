@@ -93,7 +93,7 @@ final class VirtualMachineFleetSlotDeadlineTests: XCTestCase {
         }
         XCTAssertEqual(slot.status.state, .bootstrapped)
         XCTAssertFalse(harness.events.contains("forceStop base-1"))
-        XCTAssertEqual(harness.registry.queries.count, 12)
+        XCTAssertEqual(harness.registry.queries.count, 13, "one baseline plus twelve failed polls")
 
         harness.registry.status = .online(id: 1, isBusy: false)
         try await harness.tick(slot)
@@ -123,7 +123,9 @@ final class VirtualMachineFleetSlotDeadlineTests: XCTestCase {
 
         XCTAssertEqual(outcome, .forcedStop)
         XCTAssertEqual(harness.events, ["clone base-1", "start base-1", "forceStop base-1", "delete base-1"])
-        XCTAssertTrue(harness.registry.queries.isEmpty, "the runner list is not consulted before the bootstrap")
+        XCTAssertEqual(
+            harness.registry.queries.count, 1, "only the pre-clone identity baseline is read before bootstrap"
+        )
         XCTAssertTrue(harness.logger.messages.contains { $0.contains("boot deadline tripped") })
     }
 

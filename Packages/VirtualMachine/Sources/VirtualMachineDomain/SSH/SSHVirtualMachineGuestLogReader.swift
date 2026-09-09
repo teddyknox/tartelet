@@ -26,17 +26,20 @@ public struct SSHVirtualMachineGuestLogReader<SSHClientType: SSHClient>: Virtual
         let sshClient = self.sshClient
         return try await withTimeout(timeout) {
             let connection = try await sshClient.openConnection(to: virtualMachine)
+            let closer = SSHConnectionCloser(connection)
             do {
-                let output = try await connection.executeCommandReturningOutput("""
+                let output = try await withTaskCancellationHandler {
+                    try await connection.executeCommandReturningOutput("""
 echo '--- ~/start-runner.log (last \(maximumLines) lines) ---'
 tail -n \(maximumLines) ~/start-runner.log 2>&1
 echo '--- processes by CPU ---'
 ps -axo pid,ppid,%cpu,etime,command -r 2>&1 | head -n 40
 """)
-                try? await connection.close()
+                } onCancel: { closer.begin() }
+                await closer.close()
                 return output
             } catch {
-                try? await connection.close()
+                await closer.close()
                 throw error
             }
         }

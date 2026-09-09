@@ -38,7 +38,7 @@ final class VirtualMachineFleetSlotTests: XCTestCase {
         XCTAssertEqual(outcome, .completed)
         XCTAssertEqual(slot.status.state, .idle)
         XCTAssertEqual(harness.events, ["clone base-1", "start base-1", "delete base-1"])
-        XCTAssertEqual(harness.registry.queries, ["runner 1", "runner 1", "runner 1"])
+        XCTAssertEqual(harness.registry.queries, ["runner 1", "runner 1", "runner 1", "runner 1"])
         XCTAssertTrue(harness.guestLogReader.reads.isEmpty)
         XCTAssertFalse(harness.logger.messages.contains { $0.contains("deadline tripped") })
     }

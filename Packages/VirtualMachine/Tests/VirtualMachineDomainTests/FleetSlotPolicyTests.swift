@@ -68,4 +68,14 @@ final class FleetSlotPolicyTests: XCTestCase {
 
         XCTAssertEqual(policy, .default)
     }
+
+    func testInvalidEnvironmentFallsBackToValidUserDefault() {
+        userDefaults.set(600, forKey: "shutdownTimeout")
+        for value in ["0", "-5", "invalid"] {
+            let policy = FleetSlotPolicy.fromEnvironment(
+                ["TARTELET_SHUTDOWN_TIMEOUT": value], userDefaults: userDefaults
+            )
+            XCTAssertEqual(policy.shutdownTimeout, .seconds(600))
+        }
+    }
 }

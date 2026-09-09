@@ -20,15 +20,18 @@ public struct URLSessionNetworkingService: NetworkingService {
     private let logger: Logger
     private let session: URLSession
     private let decoder: JSONDecoder
+    private let logsFailures: Bool
 
     public init(
         logger: Logger,
         session: URLSession = .shared,
-        decoder: JSONDecoder = JSONDecoder()
+        decoder: JSONDecoder = JSONDecoder(),
+        logsFailures: Bool = true
     ) {
         self.logger = logger
         self.session = session
         self.decoder = decoder
+        self.logsFailures = logsFailures
     }
 
     public func data(from request: URLRequest) async -> NetworkResponse<Data> {
@@ -36,14 +39,14 @@ public struct URLSessionNetworkingService: NetworkingService {
             let (data, response) = try await session.data(for: request)
             guard let httpURLResponse = response as? HTTPURLResponse else {
                 let requestURL = request.url?.absoluteString ?? ""
-                logger.info("Received invalid response for request to \(requestURL)")
+                log("Received invalid response for request to \(requestURL)")
                 let error: URLSessionNetworkingServiceError = .invalidResponse
                 return .failure(withError: error)
             }
             guard (200 ... 299).contains(httpURLResponse.statusCode) else {
                 let statusCode = httpURLResponse.statusCode
                 let requestURL = request.url?.absoluteString ?? ""
-                logger.info("Received unexpected status code \(statusCode) for request to \(requestURL)")
+                log("Received unexpected status code \(statusCode) for request to \(requestURL)")
                 let error: URLSessionNetworkingServiceError = .unexpectedStatusCode(httpURLResponse.statusCode)
                 return .failure(withError: error, httpURLResponse: httpURLResponse)
             }
@@ -51,7 +54,7 @@ public struct URLSessionNetworkingService: NetworkingService {
         } catch {
             let requestURL = request.url?.absoluteString ?? ""
             let errorMessage = error.localizedDescription
-            logger.info("Request to \(requestURL) failed: \(errorMessage)")
+            log("Request to \(requestURL) failed: \(errorMessage)")
             return .failure(withError: error)
         }
     }
@@ -64,9 +67,13 @@ public struct URLSessionNetworkingService: NetworkingService {
             } catch {
                 let requestURL = request.url?.absoluteString ?? ""
                 let errorMessage = error.localizedDescription
-                logger.info("Failed decoing response from request to \(requestURL): \(errorMessage)")
+                log("Failed decoding response from request to \(requestURL): \(errorMessage)")
                 throw error
             }
         }
+    }
+
+    private func log(_ message: String) {
+        if logsFailures, !Task.isCancelled { logger.info(message) }
     }
 }

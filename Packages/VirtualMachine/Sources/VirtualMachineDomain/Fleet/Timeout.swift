@@ -16,18 +16,24 @@ public struct TimeoutError: LocalizedError, Equatable {
 ///
 /// The bound is real time and holds even when the operation ignores cancellation: on timeout the
 /// operation is cancelled and left to finish on its own, and the caller continues right away. It
-/// exists so that an await on a possibly wedged guest (SSH, `tart` commands) can never hang a
-/// slot. Cancelling the calling task cancels the operation and rethrows the cancellation.
+/// exists so that an await on a possibly wedged guest cannot hang a slot. Host commands must
+/// instead use ShellProcess's bounded termination, so they cannot mutate a reused VM name later.
+/// Cancelling the calling task cancels the operation and rethrows the cancellation.
 public func withTimeout<T: Sendable>(
     _ duration: Duration,
     operation: @escaping @Sendable () async throws -> T
 ) async throws -> T {
+    try Task.checkCancellation()
     let outcome = TimeoutOutcome<T>()
-    let operationTask = Task {
-        let result = await Task { try await operation() }.result
-        outcome.resolve(result)
+    let operationTask = Task.detached {
+        do {
+            try Task.checkCancellation()
+            outcome.resolve(.success(try await operation()))
+        } catch {
+            outcome.resolve(.failure(error))
+        }
     }
-    let timerTask = Task {
+    let timerTask = Task.detached {
         try await Task.sleep(for: duration)
         outcome.resolve(.failure(TimeoutError(duration: duration)))
         operationTask.cancel()

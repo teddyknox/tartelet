@@ -9,13 +9,14 @@ public struct FleetSlotPolicy: Equatable, Sendable {
     public var bootTimeout: Duration
     /// Time from the bootstrap completing until GitHub lists the runner online.
     public var registrationTimeout: Duration
-    /// Time from the runner unregistering (or going offline after a job) until `tart run` returns.
+    /// Time in draining: after unregistering, going offline, or becoming idle after being busy.
     public var shutdownTimeout: Duration
-    /// Total lifetime of one clone, in any state. Must exceed the longest job.
+    /// Elapsed time since cloning began, including boot and idle time. Enforced while running,
+    /// even when busy; this is not a per-job budget. Idle runners are recycled too.
     public var maximumLifetime: Duration
     /// How often the runner list is polled and deadlines are evaluated.
     public var pollInterval: Duration
-    /// Pause after a failed cycle (clone or start failed) before trying again.
+    /// Pause after a failed cycle or identity-baseline request before trying again.
     public var retryDelay: Duration
 
     public init(
@@ -94,15 +95,18 @@ public struct FleetSlotPolicy: Equatable, Sendable {
     ) -> Self {
         var policy = Self.default
         for setting in Setting.allCases {
-            let environmentValue = environment[setting.environmentVariable].flatMap(Int.init)
-            let settingsValue = userDefaults.integer(forKey: setting.userDefaultsKey)
-            let value = environmentValue ?? settingsValue
-            guard value > 0 else {
+            let environmentValue = environment[setting.environmentVariable].flatMap(Int.init).flatMap(positive)
+            let settingsValue = positive(userDefaults.integer(forKey: setting.userDefaultsKey))
+            guard let value = environmentValue ?? settingsValue else {
                 continue
             }
             policy[setting] = .seconds(value)
         }
         return policy
+    }
+
+    private static func positive(_ value: Int) -> Int? {
+        value > 0 ? value : nil
     }
 
     public subscript(setting: Setting) -> Duration {

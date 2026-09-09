@@ -1,17 +1,12 @@
 import Foundation
 import LoggingDomain
 
-/// One fleet slot: runs clone → boot → register → job → power off → delete cycles for the clone
-/// named `name`, and watches each cycle from the host so a guest that wedges is recycled without
-/// human intervention.
+/// Runs one slot's clone → boot → register → job → power off → delete cycles. Host deadlines
+/// recycle wedged guests; registration deadlines require successful runner-list observations.
+/// Deletion runs once after both start and any committed recovery have finished.
 ///
-/// The host never assumes the guest will exit on its own. Every state has a deadline (see
-/// ``FleetSlotPolicy``): when one trips the slot captures the guest log, force-stops the virtual
-/// machine, deletes it and clones again. Deadlines that depend on GitHub's runner list are only
-/// evaluated against successful observations, so a transient API failure never trips them.
-///
-/// The clone is deleted in exactly one place, after `tart run` has returned, whether the guest
-/// powered off on its own or was forced off, so the two paths never race each other.
+/// There is one lifecycle caller per slot. State shared with bootstrap/status callbacks is
+/// protected by `lock`; the runner observer actor owns polling-failure logging state.
 public final class VirtualMachineFleetSlot: @unchecked Sendable {
     public let name: String
     public let runnerName: String
@@ -20,7 +15,7 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
     }
 
     private let baseVirtualMachine: VirtualMachine
-    private let runnerRegistry: GitHubActionsRunnerRegistry
+    private let runnerObserver: FleetRunnerObserver
     private let guestLogReader: VirtualMachineGuestLogReader?
     private let policy: FleetSlotPolicy
     private let clock: FleetClock
@@ -35,9 +30,8 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
     private var bootstrappedAt: Date?
     private var hasBeenBusy = false
     private var lastObservation: (status: GitHubActionsRunnerStatus, at: Date)?
-    /// Runner id last seen in the previous cycle. A guest that was forced off leaves its
-    /// registration behind until the next guest replaces it; observations of that id are stale.
-    private var staleRunnerID: Int?
+    private var runnerIdentity = FleetRunnerIdentity()
+    private var revision: UInt64 = 0
 
     public init(
         name: String,
@@ -53,7 +47,9 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
         self.name = name
         self.runnerName = runnerName
         self.baseVirtualMachine = baseVirtualMachine
-        self.runnerRegistry = runnerRegistry
+        self.runnerObserver = FleetRunnerObserver(
+            registry: runnerRegistry, runnerName: runnerName, slotName: name, clock: clock, logger: logger
+        )
         self.guestLogReader = guestLogReader
         self.policy = policy
         self.clock = clock
@@ -63,7 +59,7 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
     }
 
     /// Runs cycles until cancelled, or until `shouldStopAfterCycle` returns `true` between cycles.
-    public func run(shouldStopAfterCycle: @escaping @Sendable () -> Bool) async {
+    public func run(shouldStopAfterCycle: @escaping @Sendable () async -> Bool) async {
         log(
             "slot started for runner \"\(runnerName)\"; deadlines: boot \(format(policy.bootTimeout)),"
             + " registration \(format(policy.registrationTimeout)), shutdown \(format(policy.shutdownTimeout)),"
@@ -74,12 +70,14 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
             if Task.isCancelled || outcome == .cancelled {
                 break
             }
-            if shouldStopAfterCycle() {
+            if await shouldStopAfterCycle() {
                 log("stopping after this cycle as requested")
                 break
             }
             if outcome == .failed {
-                log("cycle failed; trying again in \(format(policy.retryDelay))")
+                if await runnerObserver.isAvailable {
+                    log("cycle failed; trying again in \(format(policy.retryDelay))")
+                }
                 do {
                     try await clock.sleep(for: policy.retryDelay)
                 } catch {
@@ -92,10 +90,16 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
 
     /// One full cycle: clone, run under the watchdog, delete. Exposed for tests.
     public func runCycle() async -> CycleOutcome {
-        beginCycle()
+        // Establish identity before this guest can register, including after an app restart.
+        // An API failure postpones cloning; it must not make an old online entry look fresh.
+        guard let baseline = await runnerObserver.read() else {
+            return Task.isCancelled ? .cancelled : .failed
+        }
+        beginCycle(baselineID: baseline.id)
         transition(to: .cloning)
         let virtualMachine: VirtualMachine
         do {
+            try Task.checkCancellation()
             virtualMachine = try await baseVirtualMachine.clone(named: name)
         } catch {
             logger.error("[slot \(name)] cloning failed: \(error.localizedDescription)")
@@ -105,7 +109,9 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
         var outcome = await runVirtualMachine(virtualMachine)
         // Both the normal and the forced path end here, so the clone is deleted exactly once.
         do {
-            try await virtualMachine.delete()
+            // Teardown owns its cancellation independently. Data implementations bound and reap
+            // commands, and must verify helpers have exited before deleting the owned directory.
+            try await Task.detached { try await virtualMachine.delete() }.value
             log("deleted clone")
         } catch {
             logger.error(
@@ -122,13 +128,10 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
 
     /// Called by the cycle's ``FleetSlotCycleObserver`` when the guest's SSH bootstrap completes.
     func didBootstrap(cycleID: UUID) {
-        let isCurrentCycle = lock.withLock { cycleID == self.cycleID }
-        guard isCurrentCycle else {
-            return
-        }
         transition(
             to: .bootstrapped,
             from: .booting,
+            cycleID: cycleID,
             reason: "SSH bootstrap completed; waiting for runner \"\(runnerName)\" to come online"
         )
     }
@@ -137,19 +140,13 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
 // MARK: - Running one clone
 
 private extension VirtualMachineFleetSlot {
-    private enum RunEvent {
-        case exited(Result<Void, Error>)
-        case watchdogFinished(tripped: Bool)
-        case forcedExitGraceElapsed
-    }
-
-    private func beginCycle() {
+    private func beginCycle(baselineID: Int?) {
         lock.withLock {
             cycleStartedAt = clock.now
             cycleID = UUID()
             bootstrappedAt = nil
             hasBeenBusy = false
-            staleRunnerID = lastObservation?.status.id
+            runnerIdentity.beginCycle(baselineID: baselineID)
             lastObservation = nil
         }
     }
@@ -237,15 +234,20 @@ private extension VirtualMachineFleetSlot {
             if Task.isCancelled {
                 return false
             }
-            if needsObservation, let observation = await observeRunner() {
-                apply(observation, at: clock.now)
+            let observationStartedAt = clock.now
+            if needsObservation, let observation = await runnerObserver.read() {
+                // A slow pre-deadline request is not evidence of the runner's state after the
+                // deadline. Conservatively date successful observations at request start.
+                apply(observation, at: observationStartedAt)
             }
             // The guest may have exited during the poll; the group cancels us when it does.
             if Task.isCancelled {
                 return false
             }
             if let deadline = trippedDeadline(at: clock.now) {
-                await recover(virtualMachine, deadline: deadline)
+                // .exited cancels this watcher when tart stop succeeds. Recovery is already
+                // committed at this point and must finish helper cleanup before the group exits.
+                await Task.detached { await self.recover(virtualMachine, deadline: deadline) }.value
                 return true
             }
         }
@@ -262,40 +264,31 @@ private extension VirtualMachineFleetSlot {
         }
     }
 
-    private func observeRunner() async -> GitHubActionsRunnerStatus? {
-        let runnerRegistry = self.runnerRegistry
-        let runnerName = self.runnerName
-        do {
-            return try await withTimeout(Self.observationTimeout) {
-                try await runnerRegistry.status(ofRunnerNamed: runnerName)
-            }
-        } catch {
-            log(
-                "could not read the runner list: \(error.localizedDescription);"
-                + " this poll does not count toward any deadline"
-            )
-            return nil
-        }
-    }
-
     private func apply(_ rawObservation: GitHubActionsRunnerStatus, at now: Date) {
-        let (state, hasBeenBusy, observation, isStale) = lock.withLock {
-            var observation = rawObservation
-            var isStale = false
-            if let staleRunnerID, let id = rawObservation.id {
-                if id == staleRunnerID {
-                    // The previous guest's registration has not been replaced yet.
-                    observation = .unregistered
-                    isStale = true
-                } else {
-                    self.staleRunnerID = nil
-                }
+        let (state, hasBeenBusy, application) = lock.withLock {
+            let application = runnerIdentity.observe(rawObservation)
+            if application.isFresh {
+                self.hasBeenBusy = false
+                if case .online(_, isBusy: true) = rawObservation { self.hasBeenBusy = true }
             }
-            lastObservation = (observation, now)
-            return (self.state, self.hasBeenBusy, observation, isStale)
+            if let observation = application.status { lastObservation = (observation, now) }
+            return (self.state, self.hasBeenBusy, application)
         }
-        if isStale {
-            log("ignoring runner id \(rawObservation.id ?? 0): the previous guest's registration, not yet replaced")
+        if let id = application.newlyIgnoredID {
+            log("ignoring runner id \(id): the previous guest's registration, not yet replaced")
+        }
+        guard let observation = application.status else {
+            return
+        }
+        if application.isFresh {
+            let next: FleetSlotState
+            if case let .online(_, isBusy) = observation {
+                next = isBusy ? .busy : .registered
+            } else {
+                next = .bootstrapped
+            }
+            transition(to: next, from: state, reason: "observed fresh runner identity \(observation.id ?? 0)")
+            return
         }
         guard let next = FleetSlotRules.transition(from: state, on: observation, hasBeenBusy: hasBeenBusy) else {
             return
@@ -345,17 +338,24 @@ private extension VirtualMachineFleetSlot {
 
 private extension VirtualMachineFleetSlot {
     /// Moves to `newState`, unless `from` is given and the slot has moved on in the meantime.
-    private func transition(to newState: FleetSlotState, from: FleetSlotState? = nil, reason: String? = nil) {
+    private func transition(
+        to newState: FleetSlotState,
+        from: FleetSlotState? = nil,
+        cycleID expectedCycleID: UUID? = nil,
+        reason: String? = nil
+    ) {
         let now = clock.now
         let result: (status: VirtualMachineFleetSlotStatus, message: String)? = lock.withLock {
-            guard newState != state, from == nil || from == state else {
+            guard newState != state, from == nil || from == state,
+                  expectedCycleID == nil || expectedCycleID == cycleID else {
                 return nil
             }
             let previousState = state
             let timeInPreviousState = now.timeIntervalSince(stateEnteredAt)
             state = newState
+            revision += 1
             stateEnteredAt = now
-            if newState == .bootstrapped {
+            if newState == .bootstrapped, bootstrappedAt == nil {
                 bootstrappedAt = now
             }
             if newState == .busy {
@@ -388,7 +388,8 @@ private extension VirtualMachineFleetSlot {
             runnerName: runnerName,
             state: state,
             stateEnteredAt: stateEnteredAt,
-            cycleStartedAt: cycleStartedAt
+            cycleStartedAt: cycleStartedAt,
+            revision: revision
         )
     }
 

@@ -8,6 +8,7 @@ final class FakeRunnerRegistry: GitHubActionsRunnerRegistry, @unchecked Sendable
     private let lock = NSLock()
     private var currentResult: Result<GitHubActionsRunnerStatus, Error> = .success(.unregistered)
     private var queriedNames: [String] = []
+    var beforeResult: (() async -> Void)?
 
     var result: Result<GitHubActionsRunnerStatus, Error> {
         get { lock.withLock { currentResult } }
@@ -31,7 +32,11 @@ final class FakeRunnerRegistry: GitHubActionsRunnerRegistry, @unchecked Sendable
     }
 
     func status(ofRunnerNamed name: String) async throws -> GitHubActionsRunnerStatus {
-        lock.withLock { queriedNames.append(name) }
+        let result = lock.withLock {
+            queriedNames.append(name)
+            return currentResult
+        }
+        await beforeResult?()
         return try result.get()
     }
 }

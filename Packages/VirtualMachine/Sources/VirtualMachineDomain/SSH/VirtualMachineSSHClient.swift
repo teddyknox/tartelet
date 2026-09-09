@@ -46,13 +46,28 @@ public struct VirtualMachineSSHClient<SSHClientType: SSHClient> {
 
     func connect(to virtualMachine: VirtualMachine) async throws -> SSHClientType.SSHConnectionType {
         let ipAddress = try await getIPAddress(of: virtualMachine)
+        try Task.checkCancellation()
         let connection = try await connectToVirtualMachine(
             named: virtualMachine.name,
             on: ipAddress,
             maximumAttempts: sshConnectionMaximumAttempts
         )
-        try await connectionHandler.didConnect(to: virtualMachine, through: connection)
-        return connection
+        let closer = SSHConnectionCloser(connection)
+        do {
+            try Task.checkCancellation()
+            try await withTaskCancellationHandler {
+                try await connectionHandler.didConnect(to: virtualMachine, through: connection)
+            } onCancel: {
+                // Some SSH operations never observe task cancellation. Close the transport
+                // without waiting for the handler to return; the outer bootstrap bound still holds.
+                closer.begin()
+            }
+            try Task.checkCancellation()
+            return connection
+        } catch {
+            await closer.close()
+            throw error
+        }
     }
 
     /// Connects in a single attempt without running the connection handler.
@@ -61,6 +76,7 @@ public struct VirtualMachineSSHClient<SSHClientType: SSHClient> {
     /// bootstrap would be wrong and retrying for minutes would defeat the purpose.
     func openConnection(to virtualMachine: VirtualMachine) async throws -> SSHClientType.SSHConnectionType {
         let ipAddress = try await virtualMachine.getIPAddress()
+        try Task.checkCancellation()
         return try await connectToVirtualMachine(named: virtualMachine.name, on: ipAddress)
     }
 }
@@ -78,6 +94,7 @@ private extension VirtualMachineSSHClient {
         do {
             return try await ipAddressReader.readIPAddress(of: virtualMachine)
         } catch {
+            try Task.checkCancellation()
             logger.error(
                 "Failed obtaining IP address of virtual machine named \(virtualMachine.name): "
                 + error.localizedDescription
@@ -96,6 +113,7 @@ private extension VirtualMachineSSHClient {
             try Task.checkCancellation()
             return try await connectToVirtualMachine(named: virtualMachineName, on: host)
         } catch {
+            try Task.checkCancellation()
             logger.error(
                 "Attempt \(attempt) out of \(maximumAttempts) to establish an SSH connection"
                 + " to the virtual machine named \(virtualMachineName) failed."
@@ -137,7 +155,12 @@ private extension VirtualMachineSSHClient {
             throw VirtualMachineSSHClientError.missingSSHPassword
         }
         do {
-            return try await client.connect(host: host, username: username, password: password)
+            let connection = try await client.connect(host: host, username: username, password: password)
+            if Task.isCancelled {
+                await Self.closeAfterCancellation(connection)
+                throw CancellationError()
+            }
+            return connection
         } catch {
             logger.error(
                 "Failed connecting to \(virtualMachineName) on \(host): "
@@ -145,5 +168,9 @@ private extension VirtualMachineSSHClient {
             )
             throw error
         }
+    }
+
+    private static func closeAfterCancellation(_ connection: SSHClientType.SSHConnectionType) async {
+        await SSHConnectionCloser(connection).close()
     }
 }

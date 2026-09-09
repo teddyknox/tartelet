@@ -37,6 +37,8 @@ final class FakeVirtualMachine: VirtualMachine, @unchecked Sendable {
     var deleteError: Error?
     /// Whether `forceStop()` makes `start(observer:)` return, as killing `tart run` does.
     var forceStopEndsStart = true
+    var afterForcedExit: (() async -> Void)?
+    var beforeDelete: (() async -> Void)?
 
     private let lock = NSLock()
     private var observer: VirtualMachineStartObserver?
@@ -54,6 +56,7 @@ final class FakeVirtualMachine: VirtualMachine, @unchecked Sendable {
     }
 
     func start(observer: VirtualMachineStartObserver?) async throws {
+        try Task.checkCancellation()
         recorder.record("start \(name)")
         if let startError {
             throw startError
@@ -76,7 +79,7 @@ final class FakeVirtualMachine: VirtualMachine, @unchecked Sendable {
             }
         } onCancel: {
             // Like tart on SIGINT: the machine stops and `tart run` returns.
-            exitGuest(with: .failure(CancellationError()))
+            exitGuest()
         }
         try result.get()
     }
@@ -113,6 +116,8 @@ final class FakeVirtualMachine: VirtualMachine, @unchecked Sendable {
     }
 
     func delete() async throws {
+        if Task.isCancelled { recorder.record("delete was cancelled") }
+        await beforeDelete?()
         recorder.record("delete \(name)")
         if let deleteError {
             throw deleteError
@@ -126,7 +131,8 @@ final class FakeVirtualMachine: VirtualMachine, @unchecked Sendable {
     func forceStop() async {
         recorder.record("forceStop \(name)")
         if forceStopEndsStart {
-            exitGuest(with: .failure(FakeGuestKilled()))
+            exitGuest()
         }
+        await afterForcedExit?()
     }
 }

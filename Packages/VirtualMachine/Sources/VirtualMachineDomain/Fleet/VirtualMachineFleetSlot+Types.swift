@@ -1,6 +1,12 @@
 import Foundation
 
 extension VirtualMachineFleetSlot {
+    enum RunEvent {
+        case exited(Result<Void, Error>)
+        case watchdogFinished(tripped: Bool)
+        case forcedExitGraceElapsed
+    }
+
     public enum CycleOutcome: Equatable {
         /// The guest powered off on its own.
         case completed

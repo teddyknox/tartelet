@@ -1,117 +1,99 @@
 import Foundation
 import ShellDomain
 
+/// Signals and timeout waits match ProcessShell: SIGINT normally exits zero; timed waits ignore
+/// Swift cancellation. All mutable process state is protected by the lock.
 final class FakeShellProcess: ShellProcess, @unchecked Sendable {
     let processIdentifier: Int32 = 4_242
+    var ignoresInterrupt = false  // configured before the process is used
     private let lock = NSLock()
-    private var running = true
     private var receivedSignals: [Int32] = []
-    private var exitContinuations: [CheckedContinuation<Result<String, Error>, Never>] = []
-    private var pendingExit: Result<String, Error>?
-
-    var isRunning: Bool {
-        lock.withLock { running }
-    }
-
-    var signals: [Int32] {
-        lock.withLock { receivedSignals }
-    }
+    private var result: Result<String, Error>?
+    private var waiters: [UUID: (Bool) -> Void] = [:]
+    var isRunning: Bool { lock.withLock { result == nil } }
+    var signals: [Int32] { lock.withLock { receivedSignals } }
 
     func interrupt() {
         lock.withLock { receivedSignals.append(SIGINT) }
+        if !ignoresInterrupt { exit() }
     }
-
-    func terminate() {
-        lock.withLock { receivedSignals.append(SIGTERM) }
+    func terminate() { signal(SIGTERM) }
+    func kill() { signal(SIGKILL) }
+    private func signal(_ number: Int32) {
+        lock.withLock { receivedSignals.append(number) }
+        exit(with: .failure(ShellExecutionError.tart(status: number)))
     }
-
-    func kill() {
-        lock.withLock { receivedSignals.append(SIGKILL) }
-    }
-
     func waitForExit() async throws -> String {
-        let result: Result<String, Error> = await withCheckedContinuation { continuation in
-            lock.lock()
-            if let pendingExit {
-                lock.unlock()
-                continuation.resume(returning: pendingExit)
-                return
+        _ = await wait(timeout: nil)
+        return try lock.withLock { try result!.get() }
+    }
+    func waitForExit(timeout: Duration) async -> Bool { await wait(timeout: timeout) }
+    private func wait(timeout: Duration?) async -> Bool {
+        await withCheckedContinuation { continuation in
+            let id = UUID()
+            let exited = lock.withLock {
+                if result != nil {
+                    return true
+                }
+                waiters[id] = { continuation.resume(returning: $0) }
+                return false
             }
-            exitContinuations.append(continuation)
-            lock.unlock()
+            if exited {
+                continuation.resume(returning: true)
+            } else if let timeout {
+                let seconds = Double(timeout.components.seconds) + Double(timeout.components.attoseconds) / 1e18
+                DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
+                    lock.withLock { waiters.removeValue(forKey: id) }?(false)
+                }
+            }
         }
-        return try result.get()
     }
-
-    func waitForExit(timeout: Duration) async -> Bool {
-        !isRunning
-    }
-
-    /// Ends the process from the test's side.
     func exit(with result: Result<String, Error> = .success("")) {
-        lock.lock()
-        running = false
-        pendingExit = result
-        let continuations = exitContinuations
-        exitContinuations = []
-        lock.unlock()
-        for continuation in continuations {
-            continuation.resume(returning: result)
+        let callbacks: [(Bool) -> Void] = lock.withLock {
+            guard self.result == nil else {
+                return []
+            }
+            self.result = result
+            let callbacks = Array(waiters.values)
+            waiters.removeAll()
+            return callbacks
         }
+        callbacks.forEach { $0(true) }
     }
 }
 
 final class FakeShell: Shell, @unchecked Sendable {
-    struct Invocation: Equatable {
-        let path: String
-        let arguments: [String]
-    }
-
+    struct Invocation { let path: String; let arguments: [String]; let environment: [String: String] }
     private let lock = NSLock()
-    private var recordedInvocations: [Invocation] = []
-    private var launched: [FakeShellProcess] = []
-
-    /// Decides the outcome of `runExecutable` by executable path and arguments.
+    private var recorded: [Invocation] = []
+    private var processes: [FakeShellProcess] = []
     var responder: (String, [String]) -> Result<String, Error> = { _, _ in .success("") }
+    var runIgnoresInterrupt = false
+    var invocations: [Invocation] { lock.withLock { recorded } }
+    var launchedProcesses: [FakeShellProcess] { lock.withLock { processes } }
 
-    var invocations: [Invocation] {
-        lock.withLock { recordedInvocations }
+    func runExecutable(atPath path: String, withArguments arguments: [String], environment: [String: String])
+        async throws -> String {
+        try await runExecutable(atPath: path, withArguments: arguments, environment: environment, timeout: .seconds(60))
     }
-
-    var launchedProcesses: [FakeShellProcess] {
-        lock.withLock { launched }
-    }
-
-    func runExecutable(
-        atPath executablePath: String,
-        withArguments arguments: [String],
-        environment: [String: String]
-    ) async throws -> String {
-        lock.withLock { recordedInvocations.append(Invocation(path: executablePath, arguments: arguments)) }
-        return try responder(executablePath, arguments).get()
-    }
-
-    func launchExecutable(
-        atPath executablePath: String,
-        withArguments arguments: [String],
-        environment: [String: String]
-    ) throws -> ShellProcess {
+    func launchExecutable(atPath path: String, withArguments arguments: [String], environment: [String: String]) throws
+        -> ShellProcess {
         let process = FakeShellProcess()
-        lock.withLock {
-            recordedInvocations.append(Invocation(path: executablePath, arguments: arguments))
-            launched.append(process)
-        }
+        if arguments.first == "run" { process.ignoresInterrupt = runIgnoresInterrupt }
+        lock.withLock { recorded.append(Invocation(path: path, arguments: arguments, environment: environment)) }
+        if arguments.first != "run" { process.exit(with: responder(path, arguments)) }
+        lock.withLock { processes.append(process) }
         return process
     }
 }
 
 extension ShellExecutionError {
-    static func tart(status: Int32, standardError: String = "", standardOutput: String = "") -> ShellExecutionError {
+    static func tart(status: Int32, standardError: String = "") -> ShellExecutionError {
         ShellExecutionError(
             executablePath: "/opt/homebrew/bin/tart",
             arguments: [],
             terminationStatus: status,
-            standardOutput: standardOutput,
+            standardOutput: "",
             standardError: standardError
         )
     }

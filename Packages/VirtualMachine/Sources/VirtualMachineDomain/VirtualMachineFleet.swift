@@ -3,6 +3,7 @@ import LoggingDomain
 import Observation
 
 @Observable
+@MainActor
 public final class VirtualMachineFleet {
     public private(set) var isStarted = false
     public private(set) var isStopping = false
@@ -16,6 +17,7 @@ public final class VirtualMachineFleet {
     private let guestLogReader: VirtualMachineGuestLogReader?
     private let policy: FleetSlotPolicy
     private let clock: FleetClock
+    private var isTerminating = false
     @ObservationIgnored
     private var activeTasks: [String: (id: UUID, task: Task<(), Never>)] = [:]
 
@@ -38,13 +40,14 @@ public final class VirtualMachineFleet {
     }
 
     public func start(numberOfMachines: Int) {
-        guard !isStarted else {
+        guard !isStarted, !isTerminating, numberOfMachines > 0 else {
             return
         }
         guard baseVirtualMachine.canStart else {
             return
         }
         isStarted = true
+        isStopping = false
         slotStatuses = []
         for index in 0 ..< numberOfMachines {
             let name = baseVirtualMachine.name + "-\(index + 1)"
@@ -53,22 +56,35 @@ public final class VirtualMachineFleet {
     }
 
     public func stopImmediately() {
-        isStarted = false
-        isStopping = false
+        isStopping = !activeTasks.isEmpty
         for (_, entry) in activeTasks {
             entry.task.cancel()
         }
-        activeTasks = [:]
-        slotStatuses = []
+        if activeTasks.isEmpty {
+            isStarted = false
+            slotStatuses = []
+        }
+    }
+
+    /// Keeps the fleet unavailable for restart until every old slot has finished teardown.
+    public func stopAndWait(forTermination: Bool = false) async {
+        if forTermination { isTerminating = true }
+        let tasks = activeTasks.values.map(\.task)
+        stopImmediately()
+        for task in tasks { await task.value }
     }
 
     public func stop() {
+        guard isStarted else {
+            return
+        }
         isStopping = true
     }
 }
 
 private extension VirtualMachineFleet {
     private func startSlot(named name: String) {
+        let runID = UUID()
         let slot = VirtualMachineFleetSlot(
             name: name,
             runnerName: GitHubActionsRunnerName.make(
@@ -83,13 +99,12 @@ private extension VirtualMachineFleet {
             logger: logger
         ) { [weak self] status in
             Task { @MainActor in
-                self?.update(status)
+                self?.update(status, runID: runID)
             }
         }
         slotStatuses.append(slot.status)
-        let runID = UUID()
         let task = Task {
-            await slot.run { [weak self] in
+            await slot.run { @MainActor [weak self] in
                 self?.isStopping ?? true
             }
             await MainActor.run { [weak self] in
@@ -100,12 +115,15 @@ private extension VirtualMachineFleet {
     }
 
     @MainActor
-    private func update(_ status: VirtualMachineFleetSlotStatus) {
+    private func update(_ status: VirtualMachineFleetSlotStatus, runID: UUID) {
+        guard activeTasks[status.name]?.id == runID else {
+            return
+        }
         guard let index = slotStatuses.firstIndex(where: { $0.name == status.name }) else {
             return
         }
         // Updates hop to the main actor individually; never let an older one overwrite a newer one.
-        guard slotStatuses[index].stateEnteredAt <= status.stateEnteredAt else {
+        guard slotStatuses[index].revision < status.revision else {
             return
         }
         slotStatuses[index] = status
