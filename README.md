@@ -35,6 +35,40 @@ Tartelet uses Tart for managing the virtual machines and Tart which in turn uses
 
 After the last step the process starts over.
 
+## 🐕 Fleet watchdog
+
+The lifecycle above assumes every virtual machine eventually powers itself off. In practice a guest can wedge: a job cancelled from GitHub can leave `xcodebuild` and the simulator running so `sudo shutdown -h now` never completes, or a fresh clone can boot without ever registering its runner. Without help from the host that slot is dead until someone kills processes by hand. This fork therefore watches every slot from the host and recycles it when it misses a deadline.
+
+Each slot moves through an explicit state machine: `idle → cloning → booting → bootstrapped → registered → busy → draining → exited`. The host learns about `bootstrapped` from its own SSH bootstrap and about `registered`, `busy` and `draining` by polling GitHub's runner list (`GET /orgs/{org}/actions/runners` or `GET /repos/{owner}/{repo}/actions/runners`) with the app installation token, matching the exact runner name of the slot. Deadlines are enforced on the host:
+
+| State | Deadline | Default | Environment variable |
+| --- | --- | --- | --- |
+| `booting` | the SSH bootstrap must complete | 5 min | `TARTELET_BOOT_TIMEOUT` |
+| `bootstrapped` | the runner must appear online in GitHub's list | 5 min | `TARTELET_REGISTRATION_TIMEOUT` |
+| `draining` | `tart run` must return after unregistering, going offline, or becoming idle after being busy | 3 min | `TARTELET_SHUTDOWN_TIMEOUT` |
+| running clone, including idle or busy | hard cap measured from the start of cloning | 3 h | `TARTELET_MAX_LIFETIME` |
+
+Two more knobs tune the cadence: `TARTELET_RUNNER_POLL_INTERVAL` (default 30 s) sets how often the runner list is polled, and `TARTELET_RETRY_DELAY` (default 10 s) is the pause after a failed cycle or an unsuccessful pre-clone identity request. All values are positive whole seconds; invalid environment values are ignored. Each variable falls back to a `UserDefaults` key with the same meaning (`bootTimeout`, `registrationTimeout`, `shutdownTimeout`, `maxLifetime`, `runnerPollInterval`, `retryDelay`) and then to the default. A failed API request does not supply evidence for the registration deadline. That deadline requires a successful request started at or after the registration timeout; a slow earlier request does not qualify. Boot, draining and lifetime deadlines continue during API outages. Before cloning, the slot requires a successful runner-list baseline so it can retire the old runner ID, including after an app restart. An API outage therefore postpones new cycles. Retired IDs remain ignored across failed replacements, and a new ID starts fresh busy/idle history. Runner-list pagination uses 100 runners per page in both scopes; a failure or a remaining next page after 50 pages makes the whole observation fail. Installation tokens are cached for 45 minutes and discarded on request failure.
+
+**The 3-hour cap is a clone-age limit, not a job timeout.** It includes cloning, boot and idle time, and recycles an idle registered runner too. A job that starts at clone age 2 h 59 min can be interrupted roughly a minute later. Set the cap for the entire intended clone lifetime; it is enforced at watchdog polls while the VM is running. A previously online runner going offline enters `draining` even if no busy poll was observed. It can return to `registered` if it comes back idle and has never been observed busy; after being busy, repeated idle polls do not reset the draining deadline.
+
+When a deadline trips the slot enters `recovering` and, in order:
+
+1. fetches the tail of `~/start-runner.log` and a process snapshot from the guest over SSH (best effort, bounded) and writes them to the host log, so the guest-side cause is visible;
+2. runs `tart stop <name>` with a short timeout, then interrupts and, if necessary, kills its own `tart run` process, then reaps an orphaned `tart run` or a Virtualization helper associated with this owned clone;
+3. after run and recovery finish, verifies ownership and that no processes still hold the disk/config, runs `tart delete`, and removes the verified clone directory if it still exists (including missing `config.json`). A running-VM error, unknown disk holder, failed inspection, or unreaped process leaves the files intact;
+4. clones again.
+
+Cloning also cleans a **marked, owned** leftover slot, reaping its orphaned processes before removing the disk pathname. New clones are created under a unique `.tartelet-clone-<UUID>` staging name, marked with their source, slot, home and directory identity, then published without replacing an existing directory. A per-slot file lock prevents two Tartelet cycles from using the same name. Cleanup refuses base images, unmarked collisions, mismatched ownership, symlinks and shared disk/config inodes. It signals only the exact system Virtualization VM helper executable holding the owned files, or the configured Tart executable running this exact name in this exact `TART_HOME`. A settings change cannot redirect a running cycle's cleanup.
+
+**Upgrade note:** clones left by an older version have no ownership marker. Stop and move or remove those known legacy clones manually before starting this fleet; Tartelet will report their paths and leave them intact. A crash during staging may leave an unpublished `.tartelet-clone-*` directory; it never starts as a VM or replaces a slot. A command that survives the SIGKILL wait keeps its slot lock until actual exit. It also records a `.tartelet-locks/*.quarantine` file: if the app exits first, a new launch refuses that slot until an operator verifies the recorded process has exited and removes the quarantine file. An unreaped clone remains under its unique staging name for inspection.
+
+SSH bootstrap (including IP discovery, authentication, scripts and close) is bounded even if the SSH library ignores cancellation. Diagnostic reads have a 30-second outer bound, and connection close has a 5-second bound. Host commands use process handles and bounded SIGINT/SIGKILL waits: clone allows 10 minutes, stop 45 seconds, IP and each process lookup 15 seconds, and delete/ordinary commands 60 seconds, followed by up to 2 seconds after SIGINT and 5 seconds after SIGKILL. `tart run` cancellation allows 15 seconds after SIGINT and 10 after SIGKILL. Output is drained incrementally with a 1 MiB tail per stream; inherited open pipes are closed 3 seconds after the parent exits. These bounds do not require a task to remain uncancelled.
+
+Stop Immediately keeps the fleet unavailable for restart until cleanup finishes. Ordinary Quit waits for that cleanup before taking the final process-registry snapshot. Forced termination of the app cannot await cleanup; the next launch recovers marked leftovers. Every state transition and deadline trip is logged with the slot and elapsed time. Unchanged runner observations are quiet; stale IDs are logged once per cycle, API failures at most once per five minutes per slot, and recovery from an API outage once. The menu bar lists each slot's current state.
+
+Inside the guest, the runner script's `EXIT` trap now kills the runner's process tree and any simulator or `xcodebuild` a cancelled job left behind before requesting `sudo shutdown -h now`, and falls back to `sudo halt -q` if the shutdown has not completed within 90 seconds.
+
 ## 🏎 How is the performance?
 
 The performance depends on the hardware that the app is running on. When testing on a Mac mini M1 from 2020 with 16 GB memory, we found that our jobs run 3 - 4 times faster than on GitHub's runners.

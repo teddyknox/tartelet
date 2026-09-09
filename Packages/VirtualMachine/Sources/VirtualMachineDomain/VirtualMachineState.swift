@@ -4,7 +4,7 @@ public enum VirtualMachineState {
     case stoppingFleet
     case editorStarted
 
-    public init(fleet: VirtualMachineFleet, editor: VirtualMachineEditor) {
+    @MainActor public init(fleet: VirtualMachineFleet, editor: VirtualMachineEditor) {
         if fleet.isStopping {
             self = .stoppingFleet
         } else if fleet.isStarted {

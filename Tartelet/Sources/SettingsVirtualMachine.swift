@@ -27,8 +27,8 @@ struct SettingsVirtualMachine<SettingsStoreType: SettingsStore>: VirtualMachineD
         TartVirtualMachine(tart: tart, vmName: name)
     }
 
-    func start() async throws {
-        try await virtualMachine.start()
+    func start(observer: VirtualMachineStartObserver?) async throws {
+        try await virtualMachine.start(observer: observer)
     }
 
     func clone(named newName: String) async throws -> VirtualMachineDomain.VirtualMachine {
@@ -41,5 +41,9 @@ struct SettingsVirtualMachine<SettingsStoreType: SettingsStore>: VirtualMachineD
 
     func getIPAddress() async throws -> String {
         try await virtualMachine.getIPAddress()
+    }
+
+    func forceStop() async {
+        await virtualMachine.forceStop()
     }
 }

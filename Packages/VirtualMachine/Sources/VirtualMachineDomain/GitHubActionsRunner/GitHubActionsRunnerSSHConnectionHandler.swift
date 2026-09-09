@@ -55,10 +55,35 @@ cat > \(startRunnerScriptFilePath) << EOF
 ACTIONS_RUNNER_ARCHIVE=./actions-runner.tar.gz
 ACTIONS_RUNNER_DIRECTORY=~/actions-runner
 
-# Ensure the virtual machine is restarted when a job is done.
+# Ensure the virtual machine is restarted when a job is done, even when a
+# cancelled job leaves processes behind that would block a clean shutdown.
 set -e pipefail
+function log_exit {
+  echo "[start-runner] \\$(date '+%H:%M:%S') \\$1"
+}
+function kill_tree {
+  local child
+  for child in \\$(pgrep -P "\\$1"); do
+    kill_tree "\\$child"
+  done
+  if [ "\\$1" != "\\$\\$" ]; then
+    kill -9 "\\$1" 2>/dev/null || true
+  fi
+}
 function onexit {
-  sudo shutdown -h now
+  set +e
+  log_exit "runner exited; cleaning up before shutdown"
+  # Kill whatever the runner left behind: its own process tree first, then
+  # anything a cancelled job may have orphaned (xcodebuild, simulators).
+  kill_tree \\$\\$
+  pkill -9 -f "Runner.Listener|Runner.Worker|xcodebuild|Simulator.app|launchd_sim|CoreSimulatorService" 2>/dev/null
+  log_exit "requesting shutdown"
+  sudo shutdown -h now >/dev/null 2>&1 &
+  # A shutdown blocked by an app that refuses to quit leaves the guest running
+  # forever; halt without ceremony if it has not completed in time.
+  sleep 90
+  log_exit "shutdown did not complete within 90s; halting"
+  sudo halt -q
 }
 trap onexit EXIT
 
@@ -119,23 +144,10 @@ nohup \(startRunnerScriptFilePath) > ~/start-runner.log 2>&1 < /dev/null &
 """)
     }
     private func runnerName(for virtualMachine: VirtualMachine) -> String {
-        let configuredRunnerName = configuration.runnerName
-
-        // If no custom runner name is configured, use the VM name as-is
-        if configuredRunnerName.isEmpty {
-            return virtualMachine.name
-        }
-
-        // Extract the index suffix from VM names like "baseVM-1", "baseVM-2"
-        let vmName = virtualMachine.name
-        if let lastDashIndex = vmName.lastIndex(of: "-") {
-            let indexString = String(vmName[vmName.index(after: lastDashIndex)...])
-            if !indexString.isEmpty, Int(indexString) != nil {
-                return "\(configuredRunnerName) \(indexString)"
-            }
-        }
-        // Fallback to just the runner name if we can't extract an index
-        return configuredRunnerName
+        GitHubActionsRunnerName.make(
+            virtualMachineName: virtualMachine.name,
+            configuredRunnerName: configuration.runnerName
+        )
     }
 }
 

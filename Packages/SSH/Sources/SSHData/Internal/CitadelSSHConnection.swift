@@ -20,6 +20,21 @@ struct CitadelSSHConnection: SSHConnection {
         }
     }
 
+    func executeCommandReturningOutput(_ command: String) async throws -> String {
+        var standardOutput = ""
+        let outputs = try await client.executeCommandStream(command, inShell: false)
+        for try await output in outputs {
+            switch output {
+            case let .stdout(buffer):
+                standardOutput += String(buffer: buffer)
+            case let .stderr(buffer):
+                let string = String(buffer: buffer)
+                logger.error(string)
+            }
+        }
+        return standardOutput
+    }
+
     func close() async throws {
         try await client.close()
     }

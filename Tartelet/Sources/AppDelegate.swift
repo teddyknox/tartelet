@@ -3,9 +3,11 @@ import Foundation
 import SettingsUI
 import VirtualMachineDomain
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private let settingsStore = Composers.settingsStore
     private let dock = Dock()
+    private var terminationTask: Task<Void, Never>?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         dock.setIconShown(Composers.settingsStore.applicationUIMode.showInDock)
@@ -35,15 +37,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    func applicationWillTerminate(_ notification: Notification) {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard terminationTask == nil else {
+            return .terminateLater
+        }
         Composers.editor.stop()
-        // Cancel the fleet's running tasks so they stop relaunching virtual machines, then
-        // interrupt the spawned `tart` processes and wait for them to exit. This gives `tart` a
-        // chance to shut its virtual machines down cleanly instead of leaking them when we quit.
-        // Reached on a graceful quit, logout and restart, and — via `TerminationSignalHandler` —
-        // on `SIGTERM`/`SIGINT`. A crash or `SIGKILL` cannot be handled here.
+        let registry = Composers.processRegistry
+        terminationTask = Task {
+            await Composers.fleet.stopAndWait(forTermination: true)
+            await Task.detached { registry.terminateAll() }.value
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        // Last-resort snapshot if the system bypasses applicationShouldTerminate. Ordinary quits
+        // have already awaited slot cleanup, and the registry refuses any launches after this.
         Composers.fleet.stopImmediately()
-        Composers.processRegistry.terminateAll()
+        Composers.processRegistry.terminateAll(gracePeriod: 0)
     }
 }
 

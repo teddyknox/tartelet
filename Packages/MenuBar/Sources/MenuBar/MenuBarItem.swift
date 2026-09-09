@@ -88,7 +88,8 @@ private extension MenuBarItem {
     private func makeVirtualMachinesMenuContent() -> some View {
         VirtualMachinesMenuContent(
             configurationState: configurationState,
-            virtualMachineState: virtualMachineState
+            virtualMachineState: virtualMachineState,
+            slotStatuses: fleet.slotStatuses
         ) { action in
             switch action {
             case .startFleet:

@@ -22,6 +22,7 @@ let package = Package(
         .package(path: "../SSH")
     ],
     targets: [
+        .executableTarget(name: "ProcessInspectorFixture", path: "Tests/ProcessInspectorFixture"),
         .target(name: "VirtualMachineData", dependencies: [
             "VirtualMachineDomain",
             .product(name: "Keychain", package: "Keychain"),
@@ -32,6 +33,18 @@ let package = Package(
             .product(name: "GitHubDomain", package: "GitHub"),
             .product(name: "LoggingDomain", package: "Logging"),
             .product(name: "SSHDomain", package: "SSH")
+        ]),
+        .testTarget(name: "VirtualMachineDomainTests", dependencies: [
+            "VirtualMachineDomain",
+            .product(name: "GitHubDomain", package: "GitHub"),
+            .product(name: "LoggingDomain", package: "Logging")
+        ]),
+        .testTarget(name: "VirtualMachineDataTests", dependencies: [
+            "ProcessInspectorFixture",
+            "VirtualMachineData",
+            .product(name: "LoggingDomain", package: "Logging"),
+            .product(name: "ShellDomain", package: "Shell"),
+            .product(name: "ShellData", package: "Shell")
         ])
     ]
 )

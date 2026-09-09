@@ -18,6 +18,9 @@ let package = Package(
         .target(name: "ShellDomain"),
         .target(name: "ShellData", dependencies: [
             "ShellDomain"
+        ]),
+        .testTarget(name: "ShellDataTests", dependencies: [
+            "ShellData", "ShellDomain"
         ])
     ]
 )
