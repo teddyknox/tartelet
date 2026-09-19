@@ -11,8 +11,8 @@ public struct FleetSlotPolicy: Equatable, Sendable {
     public var registrationTimeout: Duration
     /// Time in draining: after unregistering, going offline, or becoming idle after being busy.
     public var shutdownTimeout: Duration
-    /// Elapsed time since cloning began, including boot and idle time. Enforced while running,
-    /// even when busy; this is not a per-job budget. Idle runners are recycled too.
+    /// Elapsed time since cloning began. Recycles only registered, freshly observed idle
+    /// runners; busy guests are never subject to the lifetime cap.
     public var maximumLifetime: Duration
     /// How often the runner list is polled and deadlines are evaluated.
     public var pollInterval: Duration

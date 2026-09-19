@@ -5,6 +5,11 @@ import Foundation
 public protocol VirtualMachineStartObserver: AnyObject, Sendable {
     /// The guest is reachable and its post-boot setup over SSH (the runner bootstrap) has completed.
     func virtualMachineDidBootstrap(_ virtualMachine: VirtualMachine)
+    func virtualMachineWillStop(_ virtualMachine: VirtualMachine) async
+}
+
+public extension VirtualMachineStartObserver {
+    func virtualMachineWillStop(_ virtualMachine: VirtualMachine) async {}
 }
 
 public protocol VirtualMachine {

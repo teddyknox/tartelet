@@ -81,6 +81,7 @@ public final class SSHConnectingVirtualMachine<SSHClientType: SSHClient>: Virtua
                         // If we fail to start the virtual machine or establish the SSH connection,
                         // then we'll cancel the other operations. This ensures the virtual machine is
                         // shut down and enables the VirtualMachineFleet to start a new virtual machine.
+                        await observer?.virtualMachineWillStop(self)
                         group.cancelAll()
                         throw error
                     case .cancelled:

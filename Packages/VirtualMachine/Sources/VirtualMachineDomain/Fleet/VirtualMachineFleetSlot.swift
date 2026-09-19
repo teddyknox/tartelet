@@ -15,8 +15,10 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
     }
 
     private let baseVirtualMachine: VirtualMachine
+    private let recovery: FleetGuestRecovery
+    private var lastKnownRunnerID: Int?
     private let runnerObserver: FleetRunnerObserver
-    private let guestLogReader: VirtualMachineGuestLogReader?
+    private let identityReader: GuestRunnerIdentityReader
     private let policy: FleetSlotPolicy
     private let clock: FleetClock
     private let logger: Logger
@@ -38,19 +40,25 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
         runnerName: String,
         baseVirtualMachine: VirtualMachine,
         runnerRegistry: GitHubActionsRunnerRegistry,
+        identityReader: GuestRunnerIdentityReader,
         guestLogReader: VirtualMachineGuestLogReader?,
         policy: FleetSlotPolicy,
         clock: FleetClock,
         logger: Logger,
+        deregistrationTimeout: Duration = .seconds(20),
         statusDidChange: @escaping @Sendable (VirtualMachineFleetSlotStatus) -> Void = { _ in }
     ) {
+        self.recovery = FleetGuestRecovery(
+            name: name, runnerName: runnerName, registry: runnerRegistry, identityReader: identityReader,
+            guestLogReader: guestLogReader, clock: clock, logger: logger, deregistrationTimeout: deregistrationTimeout
+        )
         self.name = name
         self.runnerName = runnerName
         self.baseVirtualMachine = baseVirtualMachine
         self.runnerObserver = FleetRunnerObserver(
             registry: runnerRegistry, runnerName: runnerName, slotName: name, clock: clock, logger: logger
         )
-        self.guestLogReader = guestLogReader
+        self.identityReader = identityReader
         self.policy = policy
         self.clock = clock
         self.logger = logger
@@ -90,8 +98,8 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
 
     /// One full cycle: clone, run under the watchdog, delete. Exposed for tests.
     public func runCycle() async -> CycleOutcome {
-        // Establish identity before this guest can register, including after an app restart.
-        // An API failure postpones cloning; it must not make an old online entry look fresh.
+        // Retain an observed id for cleanup if this guest never reports its identity.
+        // As before, an API failure postpones cloning.
         guard let baseline = await runnerObserver.read() else {
             return Task.isCancelled ? .cancelled : .failed
         }
@@ -146,27 +154,26 @@ private extension VirtualMachineFleetSlot {
             cycleID = UUID()
             bootstrappedAt = nil
             hasBeenBusy = false
-            runnerIdentity.beginCycle(baselineID: baselineID)
+            runnerIdentity.beginCycle()
+            lastKnownRunnerID = baselineID
             lastObservation = nil
         }
     }
 
     private func runVirtualMachine(_ virtualMachine: VirtualMachine) async -> CycleOutcome {
         transition(to: .booting)
-        let observer = FleetSlotCycleObserver(slot: self, cycleID: lock.withLock { cycleID })
+        let stopper = FleetGuestStopper { reason in
+            await self.recover(virtualMachine, reason: reason)
+        }
+        let observer = FleetSlotCycleObserver(slot: self, cycleID: lock.withLock { cycleID }, stopper: stopper)
         var exitResult: Result<Void, Error>?
         var didTrip = false
         await withTaskGroup(of: RunEvent.self) { group in
             group.addTask {
-                do {
-                    try await virtualMachine.start(observer: observer)
-                    return .exited(.success(()))
-                } catch {
-                    return .exited(.failure(error))
-                }
+                .exited(await stopper.run(virtualMachine, observer: observer))
             }
             group.addTask {
-                .watchdogFinished(tripped: await self.watch(virtualMachine))
+                .watchdogFinished(tripped: await self.watch(virtualMachine, stopper: stopper))
             }
             for await event in group {
                 switch event {
@@ -217,14 +224,11 @@ private extension VirtualMachineFleetSlot {
         }
         return .completed
     }
-}
+    // MARK: - Watchdog
 
-// MARK: - Watchdog
-
-private extension VirtualMachineFleetSlot {
     /// Polls and enforces deadlines until the guest exits (the task is cancelled) or a deadline
     /// trips, in which case the guest is forced off before returning `true`.
-    private func watch(_ virtualMachine: VirtualMachine) async -> Bool {
+    private func watch(_ virtualMachine: VirtualMachine, stopper: FleetGuestStopper) async -> Bool {
         while !Task.isCancelled {
             do {
                 try await clock.sleep(for: policy.pollInterval)
@@ -234,6 +238,7 @@ private extension VirtualMachineFleetSlot {
             if Task.isCancelled {
                 return false
             }
+            if needsObservation { await readGuestIdentity(virtualMachine) }
             let observationStartedAt = clock.now
             if needsObservation, let observation = await runnerObserver.read() {
                 // A slow pre-deadline request is not evidence of the runner's state after the
@@ -247,7 +252,7 @@ private extension VirtualMachineFleetSlot {
             if let deadline = trippedDeadline(at: clock.now) {
                 // .exited cancels this watcher when tart stop succeeds. Recovery is already
                 // committed at this point and must finish helper cleanup before the group exits.
-                await Task.detached { await self.recover(virtualMachine, deadline: deadline) }.value
+                await stopper.stop(reason: "\(deadline.trip) deadline tripped: \(deadline.detail)")
                 return true
             }
         }
@@ -266,29 +271,19 @@ private extension VirtualMachineFleetSlot {
 
     private func apply(_ rawObservation: GitHubActionsRunnerStatus, at now: Date) {
         let (state, hasBeenBusy, application) = lock.withLock {
+            if let id = rawObservation.id { lastKnownRunnerID = id }
             let application = runnerIdentity.observe(rawObservation)
-            if application.isFresh {
-                self.hasBeenBusy = false
-                if case .online(_, isBusy: true) = rawObservation { self.hasBeenBusy = true }
-            }
             if let observation = application.status { lastObservation = (observation, now) }
             return (self.state, self.hasBeenBusy, application)
         }
         if let id = application.newlyIgnoredID {
-            log("ignoring runner id \(id): the previous guest's registration, not yet replaced")
+            log("ignoring runner id \(id): the previous guest's registration or an identity not reported by this guest")
         }
         guard let observation = application.status else {
             return
         }
         if application.isFresh {
-            let next: FleetSlotState
-            if case let .online(_, isBusy) = observation {
-                next = isBusy ? .busy : .registered
-            } else {
-                next = .bootstrapped
-            }
-            transition(to: next, from: state, reason: "observed fresh runner identity \(observation.id ?? 0)")
-            return
+            log("observed fresh runner identity \(observation.id ?? 0) via guest-reported id")
         }
         guard let next = FleetSlotRules.transition(from: state, on: observation, hasBeenBusy: hasBeenBusy) else {
             return
@@ -315,23 +310,29 @@ private extension VirtualMachineFleetSlot {
         return context.flatMap(FleetSlotRules.deadline(in:))
     }
 
-    private func recover(_ virtualMachine: VirtualMachine, deadline: FleetSlotRules.Deadline) async {
-        transition(to: .recovering, reason: "\(deadline.trip) deadline tripped: \(deadline.detail)")
-        let recoveryStartedAt = clock.now
-        if let guestLogReader {
-            do {
-                let guestLog = try await withTimeout(Self.guestLogTimeout) {
-                    try await guestLogReader.readGuestLog(of: virtualMachine)
-                }
-                logger.info("[slot \(name)] guest diagnostics before the forced stop:\n\(guestLog)")
-            } catch {
-                log("could not read the guest log before the forced stop: \(error.localizedDescription)")
-            }
+    private func readGuestIdentity(_ virtualMachine: VirtualMachine) async {
+        guard lock.withLock({ runnerIdentity.current == nil }) else {
+            return
         }
-        log("forcing the virtual machine to stop")
-        await virtualMachine.forceStop()
-        log("forced stop finished after \(format(clock.now.timeIntervalSince(recoveryStartedAt)))")
+        do {
+            let reader = identityReader
+            if let id = try await withTimeout(.seconds(10), operation: {
+                try await reader.runnerID(of: virtualMachine)
+            }) {
+                lock.withLock { runnerIdentity.report(id: id) }
+                log("guest reported runner id \(id) after config.sh succeeded")
+            }
+        } catch {
+            if !Task.isCancelled { log("could not read guest runner identity: \(error.localizedDescription)") }
+        }
     }
+
+    private func recover(_ virtualMachine: VirtualMachine, reason: String) async {
+        transition(to: .recovering, reason: reason)
+        let (guestID, observedID) = lock.withLock { (runnerIdentity.current, lastKnownRunnerID) }
+        await recovery.stop(virtualMachine, guestID: guestID, observedID: observedID)
+    }
+
 }
 
 // MARK: - State bookkeeping

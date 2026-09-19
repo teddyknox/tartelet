@@ -83,45 +83,6 @@ final class RecoveryRegressionTests: XCTestCase {
         XCTAssertFalse(harness.events.contains("delete was cancelled"))
     }
 
-    func testRetiredIdentitySurvivesFailedReplacementAndDoesNotPoisonFreshIdleGuest() async throws {
-        let harness = FleetSlotHarness()
-        var policy = harness.policy
-        policy.maximumLifetime = .seconds(600)
-        let slot = harness.makeSlot(policy: policy)
-        let first = Task { await slot.runCycle() }
-        try await harness.waitForState(slot, .booting)
-        try harness.latestClone().bootstrap()
-        harness.registry.status = .online(id: 1, isBusy: true)
-        try await harness.tick(slot)
-        try await harness.clock.advanceWhenSleeping(by: 601)  // lifetime-cap kill of a busy guest
-        let firstOutcome = await first.value
-        XCTAssertEqual(firstOutcome, .forcedStop)
-
-        // A failed replacement still observes only the old online registration.
-        let second = Task { await slot.runCycle() }
-        try await harness.waitForState(slot, .booting)
-        try harness.latestClone().bootstrap()
-        try await harness.tick(slot)
-        XCTAssertEqual(slot.status.state, .bootstrapped)
-        try harness.latestClone().exitGuest(with: .failure(FakeGuestKilled()))
-        _ = await second.value
-
-        let third = Task { await slot.runCycle() }
-        try await harness.waitForState(slot, .booting)
-        try harness.latestClone().bootstrap()
-        try await harness.tick(slot)
-        XCTAssertEqual(slot.status.state, .bootstrapped)
-        harness.registry.status = .online(id: 2, isBusy: false)
-        try await harness.tick(slot)
-        XCTAssertEqual(slot.status.state, .registered)
-        // A late stale API response must not erase the fresh identity or initiate draining.
-        harness.registry.status = .online(id: 1, isBusy: true)
-        try await harness.tick(slot)
-        XCTAssertEqual(slot.status.state, .registered)
-        try harness.latestClone().exitGuest()
-        _ = await third.value
-    }
-
     func testInitialOldRegistrationIsIgnoredAndAPIOutagePostponesClone() async throws {
         let harness = FleetSlotHarness()
         let slot = harness.makeSlot()
@@ -129,6 +90,7 @@ final class RecoveryRegressionTests: XCTestCase {
         let failed = await slot.runCycle()
         XCTAssertEqual(failed, .failed)
         XCTAssertTrue(harness.events.isEmpty)
+        harness.identityReader.id = 100
         harness.registry.status = .online(id: 99, isBusy: true)
         let cycle = Task { await slot.runCycle() }
         try await harness.waitForState(slot, .booting)
@@ -169,10 +131,7 @@ final class RecoveryRegressionTests: XCTestCase {
         try harness.latestClone().bootstrap()
         harness.registry.status = .online(id: 1, isBusy: true)
         try await harness.tick(slot)
-        // Re-registration can replace the ID while the state is already busy.
-        harness.registry.status = .online(id: 2, isBusy: true)
-        try await harness.tick(slot)
-        harness.registry.status = .online(id: 2, isBusy: false)
+        harness.registry.status = .online(id: 1, isBusy: false)
         try await harness.tick(slot)
         let entered = slot.status.stateEnteredAt
         for _ in 0 ..< 3 { try await harness.tick(slot) }
@@ -181,6 +140,7 @@ final class RecoveryRegressionTests: XCTestCase {
         try harness.latestClone().exitGuest()
         _ = await cycle.value
 
+        harness.identityReader.id = 2
         let idleSlot = harness.makeSlot()
         harness.registry.status = .unregistered
         let idle = Task { await idleSlot.runCycle() }
@@ -192,6 +152,143 @@ final class RecoveryRegressionTests: XCTestCase {
         let idleOutcome = await idle.value
         XCTAssertEqual(idleOutcome, .forcedStop)
     }
+}
+
+extension RecoveryRegressionTests {
+    func testBootFailureReleasesObservedRegistrationWhenGuestIdentityCannotBeRead() async throws {
+        let harness = FleetSlotHarness()
+        harness.registry.status = .offline(id: 99)
+        harness.identityReader.error = FakeAPIError()
+        let slot = harness.makeSlot()
+        let cycle = Task { await slot.runCycle() }
+        try await harness.waitForState(slot, .booting)
+        for _ in 0 ..< 11 { try await harness.tick(slot) }
+        let outcome = await cycle.value
+        XCTAssertEqual(outcome, .forcedStop)
+        XCTAssertEqual(harness.events.suffix(3), ["deregister 99", "forceStop base-1", "delete base-1"])
+    }
+
+    func testLifetimeRecycleReleasesBeforeStopAndReplacementReportsFreshIdentity() async throws {
+        let harness = FleetSlotHarness()
+        var policy = harness.policy
+        policy.maximumLifetime = .seconds(60)
+        let slot = harness.makeSlot(policy: policy)
+        let first = Task { await slot.runCycle() }
+        try await harness.waitForState(slot, .booting)
+        try harness.latestClone().bootstrap()
+        harness.registry.status = .online(id: 1, isBusy: false)
+        for _ in 0 ..< 3 { try await harness.tick(slot) }
+        let outcome = await first.value
+        XCTAssertEqual(outcome, .forcedStop)
+        XCTAssertEqual(
+            harness.events, ["clone base-1", "start base-1", "deregister 1", "forceStop base-1", "delete base-1"]
+        )
+        harness.identityReader.id = 2
+        let second = Task { await slot.runCycle() }
+        try await harness.waitForState(slot, .booting)
+        try harness.latestClone().bootstrap()
+        harness.registry.status = .online(id: 2, isBusy: false)
+        try await harness.tick(slot)
+        XCTAssertEqual(slot.status.state, .registered)
+        harness.registry.status = .online(id: 1, isBusy: true)
+        try await harness.tick(slot)
+        XCTAssertEqual(slot.status.state, .registered, "a mismatched stale id must not change this guest")
+        try harness.latestClone().exitGuest()
+        _ = await second.value
+        XCTAssertTrue(harness.logger.messages.contains { message in
+            message.contains("observed fresh runner identity 2 via guest-reported id")
+        })
+    }
+
+    func testReplacementReusesIDAfterSessionConflictThenRegistersWithoutDeadline() async throws {
+        let harness = FleetSlotHarness()
+        harness.registry.status = .offline(id: 12_118)
+        harness.identityReader.id = 12_118
+        harness.guestLogReader.log = "A session for this runner already exists / Error: Conflict"
+        let slot = harness.makeSlot()
+        let cycle = Task { await slot.runCycle() }
+        try await harness.waitForState(slot, .booting)
+        try harness.latestClone().bootstrap()
+        // The listener spends two minutes reconnecting after --replace reused the old id.
+        for _ in 0 ..< 4 { try await harness.tick(slot) }
+        XCTAssertEqual(slot.status.state, .bootstrapped)
+        harness.registry.status = .online(id: 12_118, isBusy: false)
+        for _ in 0 ..< 10 { try await harness.tick(slot) }
+        XCTAssertEqual(slot.status.state, .registered)
+        XCTAssertFalse(harness.logger.messages.contains { $0.contains("deadline tripped") })
+        try harness.latestClone().exitGuest()
+        _ = await cycle.value
+        XCTAssertFalse(harness.events.contains("forceStop base-1"))
+    }
+
+    func testReusedIdentityGoesDirectlyBusyAndSurvivesBothDeadlinesUntilJobEnds() async throws {
+        let harness = FleetSlotHarness()
+        harness.registry.status = .offline(id: 12_118)
+        harness.identityReader.id = 12_118
+        var policy = harness.policy
+        policy.maximumLifetime = .seconds(120)
+        let slot = harness.makeSlot(policy: policy)
+        let cycle = Task { await slot.runCycle() }
+        try await harness.waitForState(slot, .booting)
+        try harness.latestClone().bootstrap()
+        for _ in 0 ..< 4 { try await harness.tick(slot) }
+        harness.registry.status = .online(id: 12_118, isBusy: true)
+        for _ in 0 ..< 20 { try await harness.tick(slot) }
+        XCTAssertEqual(slot.status.state, .busy)
+        XCTAssertFalse(harness.events.contains("forceStop base-1"))
+        harness.registry.status = .unregistered
+        try await harness.tick(slot)
+        XCTAssertEqual(slot.status.state, .draining)
+        try harness.latestClone().exitGuest()
+        _ = await cycle.value
+        XCTAssertFalse(harness.logger.messages.contains { $0.contains("deadline tripped") })
+    }
+
+    func testDeregistrationFailureAndTimeoutStillStopWithDistinctReasons() async throws {
+        for timesOut in [false, true] {
+            let harness = FleetSlotHarness()
+            let gate = AsyncTestGate()
+            if timesOut {
+                harness.registry.beforeDeregister = { await gate.wait() }
+            } else {
+                harness.registry.deregistrationError = FakeAPIError()
+            }
+            let slot = harness.makeSlot(deregistrationTimeout: .milliseconds(30))
+            let cycle = Task { await slot.runCycle() }
+            try await harness.waitForState(slot, .booting)
+            try harness.latestClone().bootstrap()
+            for _ in 0 ..< 10 { try await harness.tick(slot) }
+            let outcome = await cycle.value
+            XCTAssertEqual(outcome, .forcedStop)
+            XCTAssertEqual(harness.events.suffix(3), ["deregister 1", "forceStop base-1", "delete base-1"])
+            let expected = timesOut ? "deregistration via GitHub API timed out" : "deregistration via GitHub API failed"
+            XCTAssertTrue(harness.logger.messages.contains { message in
+                message.contains(expected) && message.contains("falling through to forced stop")
+            })
+            gate.open()
+        }
+    }
+
+    func testQuitWaitsForDeregistrationBeforeStoppingGuest() async throws {
+        let harness = FleetSlotHarness()
+        let slot = harness.makeSlot()
+        let cycle = Task { await slot.runCycle() }
+        try await harness.waitForState(slot, .booting)
+        try harness.latestClone().bootstrap()
+        harness.registry.status = .online(id: 1, isBusy: false)
+        try await harness.tick(slot)
+        let gate = AsyncTestGate()
+        harness.registry.beforeDeregister = { await gate.wait() }
+        cycle.cancel()
+        try await harness.waitUntil("deregistration") { harness.events.contains("deregister 1") }
+        XCTAssertFalse(harness.events.contains("forceStop base-1"))
+        XCTAssertFalse(harness.events.contains("delete base-1"))
+        gate.open()
+        let outcome = await cycle.value
+        XCTAssertEqual(outcome, .cancelled)
+        XCTAssertEqual(harness.events.suffix(3), ["deregister 1", "forceStop base-1", "delete base-1"])
+    }
+
 }
 
 /// Reusable, cancellation-ignoring latch. Opening before the waiter is installed is safe.

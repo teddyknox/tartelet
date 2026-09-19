@@ -19,6 +19,9 @@ enum FleetSlotHarnessError: Error, CustomStringConvertible {
 final class FleetSlotHarness {
     let recorder = FakeVirtualMachineRecorder()
     let registry = FakeRunnerRegistry()
+    let identityReader = FakeGuestIdentityReader()
+
+    init() { registry.recorder = recorder }
     let guestLogReader = FakeGuestLogReader()
     let clock = ManualClock()
     let logger = SpyLogger()
@@ -34,6 +37,7 @@ final class FleetSlotHarness {
 
     func makeSlot(
         policy: FleetSlotPolicy? = nil,
+        deregistrationTimeout: Duration = .seconds(20),
         statusDidChange: @escaping @Sendable (VirtualMachineFleetSlotStatus) -> Void = { _ in }
     ) -> VirtualMachineFleetSlot {
         VirtualMachineFleetSlot(
@@ -41,10 +45,12 @@ final class FleetSlotHarness {
             runnerName: "runner 1",
             baseVirtualMachine: base,
             runnerRegistry: registry,
+            identityReader: identityReader,
             guestLogReader: guestLogReader,
             policy: policy ?? self.policy,
             clock: clock,
             logger: logger,
+            deregistrationTimeout: deregistrationTimeout,
             statusDidChange: statusDidChange
         )
     }

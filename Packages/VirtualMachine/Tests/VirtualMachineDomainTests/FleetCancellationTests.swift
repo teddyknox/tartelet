@@ -11,6 +11,7 @@ final class FleetCancellationTests: XCTestCase {
             baseVirtualMachine: harness.base,
             runnerRegistry: harness.registry,
             runnerConfiguration: Configuration(),
+            identityReader: harness.identityReader,
             clock: harness.clock
         )
         fleet.start(numberOfMachines: 1)

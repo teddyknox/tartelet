@@ -50,6 +50,7 @@ enum Composers {
             configuration: gitHubActionsRunnerConfiguration
         ),
         runnerConfiguration: gitHubActionsRunnerConfiguration,
+        identityReader: SSHGuestRunnerIdentityReader(sshClient: virtualMachineSSHClient),
         guestLogReader: SSHVirtualMachineGuestLogReader(
             sshClient: virtualMachineSSHClient
         ),
@@ -118,7 +119,8 @@ enum Composers {
             fileSystem: DiskFileSystem(),
             dateProvider: FoundationDateProvider(),
             subsystem: subsystem,
-            daysOfRetention: 7
+            // Preserve fleet incident evidence across app upgrades and relaunches.
+            daysOfRetention: nil
         )
     }
 }

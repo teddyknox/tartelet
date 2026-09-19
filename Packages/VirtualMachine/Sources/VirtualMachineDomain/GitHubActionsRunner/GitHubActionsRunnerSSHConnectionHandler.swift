@@ -135,11 +135,14 @@ cd \\$ACTIONS_RUNNER_DIRECTORY
   --token "\(runnerToken.rawValue)"\\\\
   \(configuration.runnerDisableUpdates ? "--disableupdate" : "")\\\\
   \(configuration.runnerDisableDefaultLabels ? "--no-default-labels" : "")
+cp .runner ~/.tartelet-runner-identity.tmp
+mv ~/.tartelet-runner-identity.tmp ~/.tartelet-runner-identity
 ./run.sh
 EOF
 """)
         try await connection.executeCommand("chmod +x \(startRunnerScriptFilePath)")
         try await connection.executeCommand("""
+rm -f ~/.tartelet-runner-identity ~/.tartelet-runner-identity.tmp
 nohup \(startRunnerScriptFilePath) > ~/start-runner.log 2>&1 < /dev/null &
 """)
     }

@@ -1,5 +1,5 @@
-/// Identity history is independent of registration/busy state. The owning slot serializes access
-/// under its lock. Old IDs survive failed replacements, but never hide a newly observed ID.
+/// The guest's post-configure agentId is authoritative, including when --replace reuses an id.
+/// The owning slot serializes access under its lock.
 struct FleetRunnerIdentity {
     struct Observation {
         var status: GitHubActionsRunnerStatus?
@@ -7,32 +7,32 @@ struct FleetRunnerIdentity {
         var newlyIgnoredID: Int?
     }
 
-    private var retired: Set<Int> = []
-    private var current: Int?
+    private(set) var current: Int?
+    private var observed = false
     private var logged: Set<Int> = []
 
-    mutating func beginCycle(baselineID: Int?) {
-        if let current { retired.insert(current) }
-        if let baselineID { retired.insert(baselineID) }
+    mutating func beginCycle() {
         current = nil
+        observed = false
         logged = []
+    }
+
+    mutating func report(id: Int) {
+        current = id
     }
 
     mutating func observe(_ status: GitHubActionsRunnerStatus) -> Observation {
         guard let id = status.id else {
             return Observation(status: status)
         }
-        if retired.contains(id) {
+        guard id == current else {
             return Observation(
-                status: current == nil ? .unregistered : nil,
+                status: observed ? nil : .unregistered,
                 newlyIgnoredID: logged.insert(id).inserted ? id : nil
             )
         }
-        if current != id {
-            if let current { retired.insert(current) }
-            current = id
-            return Observation(status: status, isFresh: true)
-        }
-        return Observation(status: status)
+        let fresh = !observed
+        observed = true
+        return Observation(status: status, isFresh: fresh)
     }
 }

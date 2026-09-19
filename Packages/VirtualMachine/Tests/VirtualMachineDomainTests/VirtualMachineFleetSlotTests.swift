@@ -66,6 +66,7 @@ final class VirtualMachineFleetSlotTests: XCTestCase {
         try harness.latestClone().exitGuest(with: .failure(FakeGuestKilled()))
         _ = await cycle.value
 
+        harness.identityReader.id = 2
         cycle = Task { await slot.runCycle() }
         try await harness.waitForState(slot, .booting)
         try harness.latestClone().bootstrap()
@@ -100,7 +101,9 @@ final class VirtualMachineFleetSlotTests: XCTestCase {
         let outcome = await cycle.value
 
         XCTAssertEqual(outcome, .cancelled)
-        XCTAssertEqual(harness.events, ["clone base-1", "start base-1", "delete base-1"])
+        XCTAssertEqual(
+            harness.events, ["clone base-1", "start base-1", "deregister 1", "forceStop base-1", "delete base-1"]
+        )
         XCTAssertEqual(slot.status.state, .idle)
     }
 

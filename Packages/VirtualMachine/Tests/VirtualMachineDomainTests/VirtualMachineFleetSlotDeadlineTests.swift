@@ -32,7 +32,9 @@ final class VirtualMachineFleetSlotDeadlineTests: XCTestCase {
         let outcome = await cycle.value
 
         XCTAssertEqual(outcome, .forcedStop)
-        XCTAssertEqual(harness.events, ["clone base-1", "start base-1", "forceStop base-1", "delete base-1"])
+        XCTAssertEqual(
+            harness.events, ["clone base-1", "start base-1", "deregister 1", "forceStop base-1", "delete base-1"]
+        )
         XCTAssertEqual(harness.guestLogReader.reads, ["base-1"], "the guest log is captured before the forced stop")
         XCTAssertTrue(harness.logger.messages.contains { $0.contains("registration deadline tripped") })
         XCTAssertTrue(harness.logger.messages.contains { $0.contains("fake guest log") })
@@ -74,7 +76,9 @@ final class VirtualMachineFleetSlotDeadlineTests: XCTestCase {
         let outcome = await cycle.value
 
         XCTAssertEqual(outcome, .forcedStop)
-        XCTAssertEqual(harness.events, ["clone base-1", "start base-1", "forceStop base-1", "delete base-1"])
+        XCTAssertEqual(
+            harness.events, ["clone base-1", "start base-1", "deregister 1", "forceStop base-1", "delete base-1"]
+        )
         XCTAssertTrue(harness.logger.messages.contains { $0.contains("shutdown deadline tripped") })
     }
 
@@ -122,32 +126,29 @@ final class VirtualMachineFleetSlotDeadlineTests: XCTestCase {
         let outcome = await cycle.value
 
         XCTAssertEqual(outcome, .forcedStop)
-        XCTAssertEqual(harness.events, ["clone base-1", "start base-1", "forceStop base-1", "delete base-1"])
         XCTAssertEqual(
-            harness.registry.queries.count, 1, "only the pre-clone identity baseline is read before bootstrap"
+            harness.events, ["clone base-1", "start base-1", "deregister 1", "forceStop base-1", "delete base-1"]
+        )
+        XCTAssertEqual(
+            harness.registry.queries.count, 1, "the guest identity supplies the removal id before bootstrap"
         )
         XCTAssertTrue(harness.logger.messages.contains { $0.contains("boot deadline tripped") })
     }
 
-    func testLifetimeCapForcesStopEvenWhileBusy() async throws {
-        var shortLived = harness.policy
-        shortLived.maximumLifetime = .seconds(600)
-        let slot = harness.makeSlot(policy: shortLived)
+    func testLifetimeCapNeverStopsBusyGuest() async throws {
+        var policy = harness.policy
+        policy.maximumLifetime = .seconds(60)
+        let slot = harness.makeSlot(policy: policy)
         let cycle = Task { await slot.runCycle() }
         try await harness.waitForState(slot, .booting)
         try harness.latestClone().bootstrap()
         harness.registry.status = .online(id: 1, isBusy: true)
-        try await harness.tick(slot)
-        try await harness.waitForState(slot, .busy)
-
-        while !harness.events.contains("forceStop base-1"), slot.status.state != .idle {
-            try await harness.tick(slot)
-        }
+        for _ in 0 ..< 20 { try await harness.tick(slot) }
+        XCTAssertEqual(slot.status.state, .busy)
+        XCTAssertFalse(harness.events.contains("forceStop base-1"))
+        try harness.latestClone().exitGuest()
         let outcome = await cycle.value
-
-        XCTAssertEqual(outcome, .forcedStop)
-        XCTAssertTrue(harness.logger.messages.contains { $0.contains("lifetime deadline tripped") })
-        XCTAssertGreaterThan(harness.clock.now.timeIntervalSince(ManualClock().now), 600)
+        XCTAssertEqual(outcome, .completed)
     }
 
     func testForcedStopThatDoesNotEndTartRunIsCancelledAfterGracePeriod() async throws {
