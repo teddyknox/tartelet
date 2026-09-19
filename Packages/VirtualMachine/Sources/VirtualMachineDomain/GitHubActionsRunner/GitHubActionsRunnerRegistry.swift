@@ -3,9 +3,8 @@ import GitHubDomain
 
 /// What GitHub currently reports for one runner name.
 ///
-/// Every registration gets a new runner id, even when it replaces an earlier registration with
-/// the same name (`config.sh --replace`). The id therefore tells a fresh registration apart from a
-/// stale entry left behind by a guest that was killed.
+/// Replacement can reuse an id while a prior listener session is still live. The guest must
+/// report its configured agentId; a change in the runner list alone does not establish identity.
 public enum GitHubActionsRunnerStatus: Equatable {
     /// No runner with the name is listed. An ephemeral runner disappears once its job is done.
     case unregistered
@@ -26,6 +25,7 @@ public enum GitHubActionsRunnerStatus: Equatable {
 
 /// Looks up the registration state of the runner a fleet slot is responsible for.
 public protocol GitHubActionsRunnerRegistry {
+    func deregisterRunner(id: Int) async throws
     func status(ofRunnerNamed name: String) async throws -> GitHubActionsRunnerStatus
 }
 
@@ -47,6 +47,17 @@ public actor GitHubClientActionsRunnerRegistry: GitHubActionsRunnerRegistry {
         self.client = client
         self.configuration = configuration
         self.tokenLifetime = tokenLifetime
+    }
+
+    public func deregisterRunner(id: Int) async throws {
+        do {
+            let token = try await accessToken()
+            try Task.checkCancellation()
+            try await client.deleteRunner(id: id, with: token, runnerScope: configuration.runnerScope)
+        } catch {
+            cachedToken = nil
+            throw error
+        }
     }
 
     public func status(ofRunnerNamed name: String) async throws -> GitHubActionsRunnerStatus {

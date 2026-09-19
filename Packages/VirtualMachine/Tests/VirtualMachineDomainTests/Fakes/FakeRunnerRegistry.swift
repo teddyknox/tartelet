@@ -8,6 +8,9 @@ final class FakeRunnerRegistry: GitHubActionsRunnerRegistry, @unchecked Sendable
     private let lock = NSLock()
     private var currentResult: Result<GitHubActionsRunnerStatus, Error> = .success(.unregistered)
     private var queriedNames: [String] = []
+    var recorder: FakeVirtualMachineRecorder?
+    var deregistrationError: Error?
+    var beforeDeregister: (() async -> Void)?
     var beforeResult: (() async -> Void)?
 
     var result: Result<GitHubActionsRunnerStatus, Error> {
@@ -29,6 +32,13 @@ final class FakeRunnerRegistry: GitHubActionsRunnerRegistry, @unchecked Sendable
 
     var queries: [String] {
         lock.withLock { queriedNames }
+    }
+
+    func deregisterRunner(id: Int) async throws {
+        recorder?.record("deregister \(id)")
+        await beforeDeregister?()
+        if let deregistrationError { throw deregistrationError }
+        status = .unregistered
     }
 
     func status(ofRunnerNamed name: String) async throws -> GitHubActionsRunnerStatus {
@@ -74,5 +84,14 @@ final class SpyLogger: LoggingDomain.Logger, @unchecked Sendable {
 
     func error(_ message: String) {
         lock.withLock { lines.append("ERROR: \(message)") }
+    }
+}
+
+final class FakeGuestIdentityReader: GuestRunnerIdentityReader, @unchecked Sendable {
+    var id: Int? = 1
+    var error: Error?
+    func runnerID(of virtualMachine: VirtualMachine) async throws -> Int? {
+        if let error { throw error }
+        return id
     }
 }

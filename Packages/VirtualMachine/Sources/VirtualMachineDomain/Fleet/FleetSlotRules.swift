@@ -16,7 +16,7 @@ enum FleetSlotRules {
     ) -> Transition? {
         switch (state, observation) {
         case let (.bootstrapped, .online(id, isBusy)):
-            return Transition(state: isBusy ? .busy : .registered, reason: "runner is online (id \(id))")
+            return Transition(state: isBusy ? .busy : .registered, reason: "runner is online (guest-reported id \(id))")
         case (.registered, .online(_, isBusy: true)):
             return Transition(state: .busy, reason: "runner picked up a job")
         case (.registered, .unregistered):
@@ -64,7 +64,11 @@ enum FleetSlotRules {
             return deadline
         }
         let lifetime = context.now.timeIntervalSince(context.cycleStartedAt)
-        guard lifetime > context.policy.maximumLifetime.timeInterval else {
+        guard context.state == .registered,
+              lifetime > context.policy.maximumLifetime.timeInterval,
+              let observation = context.lastObservation,
+              context.now.timeIntervalSince(observation.at) < context.policy.pollInterval.timeInterval,
+              case .online(_, isBusy: false) = observation.status else {
             return nil
         }
         return Deadline(

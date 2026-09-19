@@ -1,5 +1,5 @@
 import Foundation
-import VirtualMachineDomain
+@testable import VirtualMachineDomain
 import XCTest
 
 final class FleetSlotPolicyTests: XCTestCase {
@@ -8,6 +8,27 @@ final class FleetSlotPolicyTests: XCTestCase {
     override func setUp() {
         super.setUp()
         userDefaults.removePersistentDomain(forName: "FleetSlotPolicyTests")
+    }
+
+    func testLifetimeOnlyAppliesToRegisteredWithFreshIdleObservation() {
+        let now = Date()
+        let states: [FleetSlotState] = [
+            .idle, .cloning, .booting, .bootstrapped, .registered, .busy, .draining, .recovering, .exited
+        ]
+        for state in states {
+            let context = FleetSlotRules.DeadlineContext(
+                state: state, stateEnteredAt: now, cycleStartedAt: now.addingTimeInterval(-20_000),
+                bootstrappedAt: now, lastObservation: (.online(id: 1, isBusy: false), now),
+                runnerName: "runner", policy: .default, now: now
+            )
+            XCTAssertEqual(FleetSlotRules.deadline(in: context)?.trip, state == .registered ? .lifetimeExceeded : nil)
+        }
+        let stale = FleetSlotRules.DeadlineContext(
+            state: .registered, stateEnteredAt: now, cycleStartedAt: now.addingTimeInterval(-20_000),
+            bootstrappedAt: now, lastObservation: (.online(id: 1, isBusy: false), now.addingTimeInterval(-30)),
+            runnerName: "runner", policy: .default, now: now
+        )
+        XCTAssertNil(FleetSlotRules.deadline(in: stale), "an API outage cannot authorize an idle recycle")
     }
 
     func testDefaults() {

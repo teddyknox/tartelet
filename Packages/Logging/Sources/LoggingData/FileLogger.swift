@@ -11,7 +11,7 @@ public final class FileLogger: LoggingDomain.Logger {
     private let fileSystem: FileSystem
     private let dateProvider: DateProvider
     private let subsystem: String
-    private let daysOfRetention: Int
+    private let daysOfRetention: Int?
     private var filenameDateFormatter = DateFormatter()
     private var logsDirectory: LogsDirectory {
         LogsDirectory(fileSystem: fileSystem)
@@ -28,7 +28,7 @@ public final class FileLogger: LoggingDomain.Logger {
         fileSystem: FileSystem,
         dateProvider: DateProvider,
         subsystem: String,
-        daysOfRetention: Int
+        daysOfRetention: Int?
     ) {
         self.fileSystem = fileSystem
         self.dateProvider = dateProvider
@@ -75,6 +75,9 @@ private extension FileLogger {
     }
 
     private func removeOldLogs() throws {
+        guard let daysOfRetention else {
+            return
+        }
         let fileURLs = try fileSystem.contentsOfDirectory(at: logsDirectory.url)
         for fileURL in fileURLs {
             let filename = fileURL.lastPathComponent

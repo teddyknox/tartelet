@@ -14,6 +14,7 @@ public final class VirtualMachineFleet {
     private let baseVirtualMachine: VirtualMachine
     private let runnerRegistry: GitHubActionsRunnerRegistry
     private let runnerConfiguration: GitHubActionsRunnerConfiguration
+    private let identityReader: GuestRunnerIdentityReader
     private let guestLogReader: VirtualMachineGuestLogReader?
     private let policy: FleetSlotPolicy
     private let clock: FleetClock
@@ -26,6 +27,7 @@ public final class VirtualMachineFleet {
         baseVirtualMachine: VirtualMachine,
         runnerRegistry: GitHubActionsRunnerRegistry,
         runnerConfiguration: GitHubActionsRunnerConfiguration,
+        identityReader: GuestRunnerIdentityReader,
         guestLogReader: VirtualMachineGuestLogReader? = nil,
         policy: FleetSlotPolicy = .default,
         clock: FleetClock = SystemFleetClock()
@@ -34,6 +36,7 @@ public final class VirtualMachineFleet {
         self.baseVirtualMachine = baseVirtualMachine
         self.runnerRegistry = runnerRegistry
         self.runnerConfiguration = runnerConfiguration
+        self.identityReader = identityReader
         self.guestLogReader = guestLogReader
         self.policy = policy
         self.clock = clock
@@ -93,6 +96,7 @@ private extension VirtualMachineFleet {
             ),
             baseVirtualMachine: baseVirtualMachine,
             runnerRegistry: runnerRegistry,
+            identityReader: identityReader,
             guestLogReader: guestLogReader,
             policy: policy,
             clock: clock,

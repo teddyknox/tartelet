@@ -80,6 +80,26 @@ final class SSHTimeoutRegressionTests: XCTestCase {
         await task.value
     }
 
+    func testGuestIdentityReadHandlesMissingMalformedAndReusedIDWithoutBootstrapping() async throws {
+        let connection = ProbeConnection()
+        let ssh = VirtualMachineSSHClient(
+            logger: SpyLogger(), client: ProbeSSHClient(connection: connection),
+            ipAddressReader: ProbeIPReader {}, credentialsStore: ProbeCredentials(),
+            connectionHandler: ProbeHandler { XCTFail("identity reads must not bootstrap") }
+        )
+        let reader = SSHGuestRunnerIdentityReader(sshClient: ssh)
+        let guest = FakeVirtualMachine(name: "guest", recorder: FakeVirtualMachineRecorder())
+        connection.output = ""
+        let missing = try await reader.runnerID(of: guest)
+        XCTAssertNil(missing)
+        connection.output = #"{"agentId":12118,"agentName":"runner"}"#
+        let reused = try await reader.runnerID(of: guest)
+        XCTAssertEqual(reused, 12_118)
+        connection.output = "partial JSON"
+        do { _ = try await reader.runnerID(of: guest); XCTFail("malformed identity") } catch {}
+        XCTAssertEqual(connection.closeCount, 3)
+    }
+
     func testGuestLogTimeoutClosesTransportEvenIfReadNeverReturns() async throws {
         let gate = AsyncTestGate()
         let closed = expectation(description: "transport closed")
@@ -116,9 +136,10 @@ private final class ProbeConnection: SSHConnection {
     private var closes = 0
     var onClose: () async -> Void = {}
     var onRead: () async -> Void = {}
+    var output = "log"
     var closeCount: Int { lock.withLock { closes } }
     func executeCommand(_ command: String) async throws {}
-    func executeCommandReturningOutput(_ command: String) async throws -> String { await onRead(); return "log" }
+    func executeCommandReturningOutput(_ command: String) async throws -> String { await onRead(); return output }
     func close() async throws { lock.withLock { closes += 1 }; await onClose() }
 }
 private struct ProbeIPReader: VirtualMachineIPAddressReader {

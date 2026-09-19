@@ -96,6 +96,22 @@ public final class NetworkingGitHubClient: GitHubClient {
         }
     }
 
+    public func deleteRunner(
+        id: Int, with appAccessToken: GitHubAppAccessToken, runnerScope: GitHubRunnerScope
+    ) async throws {
+        let path = try await runnerScope.runnersPath(using: credentialsStore)
+        var request = URLRequest(url: baseURL.appending(path: "\(path)/\(id)"))
+            .addingBearerToken(appAccessToken.rawValue)
+        request.httpMethod = "DELETE"
+        try Task.checkCancellation()
+        let response = await networkingService.data(from: request)
+        // Already absent is a successful release, including ephemeral self-deregistration.
+        if response.httpURLResponse?.statusCode == 404 {
+            return
+        }
+        _ = try response.map(\.value)
+    }
+
     public func getRunners(
         with appAccessToken: GitHubAppAccessToken,
         runnerScope: GitHubRunnerScope

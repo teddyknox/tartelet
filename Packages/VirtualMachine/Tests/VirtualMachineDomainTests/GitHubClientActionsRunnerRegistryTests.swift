@@ -64,6 +64,18 @@ final class GitHubClientActionsRunnerRegistryTests: XCTestCase {
         XCTAssertEqual(client.tokenRequests, 2)
     }
 
+    func testDeregistrationUsesCachedTokenAndDropsItAfterFailure() async throws {
+        _ = try await registry.status(ofRunnerNamed: "runner 1")
+        try await registry.deregisterRunner(id: 12_118)
+        XCTAssertEqual(client.tokenRequests, 1)
+        client.deleteError = FakeAPIError()
+        do { try await registry.deregisterRunner(id: 12_118); XCTFail("expected failure") } catch {}
+        client.deleteError = nil
+        try await registry.deregisterRunner(id: 12_118)
+        XCTAssertEqual(client.tokenRequests, 2)
+        XCTAssertEqual(client.deletedIDs, [12_118, 12_118, 12_118])
+    }
+
     func testTokenIsRefreshedAfterItsLifetime() async throws {
         registry = GitHubClientActionsRunnerRegistry(
             client: client,
@@ -90,6 +102,8 @@ private struct FakeRunnerConfiguration: GitHubActionsRunnerConfiguration {
 private final class FakeGitHubClient: GitHubClient, @unchecked Sendable {
     var runners: [GitHubRunner] = []
     var listError: Error?
+    var deleteError: Error?
+    var deletedIDs: [Int] = []
     private(set) var tokenRequests = 0
     private(set) var listRequests = 0
 
@@ -110,6 +124,11 @@ private final class FakeGitHubClient: GitHubClient, @unchecked Sendable {
         runnerScope: GitHubRunnerScope
     ) async throws -> URL {
         URL(string: "https://example.com/runner.tar.gz")!
+    }
+
+    func deleteRunner(id: Int, with appAccessToken: GitHubAppAccessToken, runnerScope: GitHubRunnerScope) async throws {
+        deletedIDs.append(id)
+        if let deleteError { throw deleteError }
     }
 
     func getRunners(
