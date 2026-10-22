@@ -41,15 +41,18 @@ enum FleetSlotRules {
         }
     }
 
+    /// Deadlines are measured in the host's awake time (``FleetInstant/awakeTime(since:)``): a
+    /// sleep gap is never charged to the guest. Observation freshness uses wall time, because the
+    /// runner list can change while the host sleeps.
     struct DeadlineContext {
         let state: FleetSlotState
-        let stateEnteredAt: Date
-        let cycleStartedAt: Date
-        let bootstrappedAt: Date?
-        let lastObservation: (status: GitHubActionsRunnerStatus, at: Date)?
+        let stateEnteredAt: FleetInstant
+        let cycleStartedAt: FleetInstant
+        let bootstrappedAt: FleetInstant?
+        let lastObservation: (status: GitHubActionsRunnerStatus, at: FleetInstant)?
         let runnerName: String
         let policy: FleetSlotPolicy
-        let now: Date
+        let now: FleetInstant
     }
 
     struct Deadline: Equatable {
@@ -63,26 +66,33 @@ enum FleetSlotRules {
         if let deadline = stateDeadline(in: context) {
             return deadline
         }
-        let lifetime = context.now.timeIntervalSince(context.cycleStartedAt)
+        let lifetime = context.now.awakeTime(since: context.cycleStartedAt)
         guard context.state == .registered,
               lifetime > context.policy.maximumLifetime.timeInterval,
               let observation = context.lastObservation,
-              context.now.timeIntervalSince(observation.at) < context.policy.pollInterval.timeInterval,
+              context.now.wallTime(since: observation.at) < context.policy.pollInterval.timeInterval,
               case .online(_, isBusy: false) = observation.status else {
             return nil
         }
         return Deadline(
             trip: .lifetimeExceeded,
-            detail: "clone has existed for \(format(lifetime)), longer than the lifetime cap of"
+            detail: "clone has existed for \(format(lifetime)) of awake time, longer than the lifetime cap of"
                 + " \(format(context.policy.maximumLifetime)) (state \(context.state.rawValue))"
+                + sleepNote(context.now.timeAsleep(since: context.cycleStartedAt))
         )
+    }
+
+    /// Names a sleep gap in a deadline detail, so a trip that follows one reads as such.
+    static func sleepNote(_ asleep: TimeInterval) -> String {
+        asleep >= 1 ? "; the host was asleep for \(format(asleep)) of the wall-clock time" : ""
     }
 }
 
 private extension FleetSlotRules {
     private static func stateDeadline(in context: DeadlineContext) -> Deadline? {
         let policy = context.policy
-        let inState = context.now.timeIntervalSince(context.stateEnteredAt)
+        let inState = context.now.awakeTime(since: context.stateEnteredAt)
+        let asleep = context.now.timeAsleep(since: context.stateEnteredAt)
         switch context.state {
         case .booting:
             guard inState > policy.bootTimeout.timeInterval else {
@@ -91,7 +101,7 @@ private extension FleetSlotRules {
             return Deadline(
                 trip: .bootTimeout,
                 detail: "guest did not complete its SSH bootstrap within \(format(policy.bootTimeout))"
-                    + " (\(format(inState)) since tart run started)"
+                    + " (\(format(inState)) awake since tart run started\(sleepNote(asleep)))"
             )
         case .bootstrapped:
             // Only an observation taken after the deadline can trip it, so that an API outage
@@ -99,14 +109,16 @@ private extension FleetSlotRules {
             guard let bootstrappedAt = context.bootstrappedAt, let observation = context.lastObservation else {
                 return nil
             }
-            let sinceBootstrap = observation.at.timeIntervalSince(bootstrappedAt)
+            let sinceBootstrap = observation.at.awakeTime(since: bootstrappedAt)
             guard sinceBootstrap >= policy.registrationTimeout.timeInterval, !observation.status.isOnline else {
                 return nil
             }
+            let asleepSinceBootstrap = observation.at.timeAsleep(since: bootstrappedAt)
             return Deadline(
                 trip: .registrationTimeout,
                 detail: "runner \"\(context.runnerName)\" was \(observation.status.summary)"
-                    + " \(format(sinceBootstrap)) after bootstrap (deadline \(format(policy.registrationTimeout)))"
+                    + " \(format(sinceBootstrap)) of awake time after bootstrap"
+                    + " (deadline \(format(policy.registrationTimeout))\(sleepNote(asleepSinceBootstrap)))"
             )
         case .draining:
             guard inState > policy.shutdownTimeout.timeInterval else {
@@ -115,7 +127,7 @@ private extension FleetSlotRules {
             return Deadline(
                 trip: .shutdownTimeout,
                 detail: "guest did not power off within \(format(policy.shutdownTimeout)) of its runner finishing"
-                    + " (\(format(inState)) in draining)"
+                    + " (\(format(inState)) awake in draining\(sleepNote(asleep)))"
             )
         case .idle, .cloning, .registered, .busy, .recovering, .exited:
             return nil

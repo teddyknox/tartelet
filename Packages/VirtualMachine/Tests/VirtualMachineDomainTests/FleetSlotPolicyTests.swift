@@ -11,24 +11,33 @@ final class FleetSlotPolicyTests: XCTestCase {
     }
 
     func testLifetimeOnlyAppliesToRegisteredWithFreshIdleObservation() {
-        let now = Date()
+        let now = FleetInstant(date: Date(), uptime: 50_000)
         let states: [FleetSlotState] = [
             .idle, .cloning, .booting, .bootstrapped, .registered, .busy, .draining, .recovering, .exited
         ]
         for state in states {
             let context = FleetSlotRules.DeadlineContext(
-                state: state, stateEnteredAt: now, cycleStartedAt: now.addingTimeInterval(-20_000),
+                state: state, stateEnteredAt: now, cycleStartedAt: now.earlier(by: 20_000),
                 bootstrappedAt: now, lastObservation: (.online(id: 1, isBusy: false), now),
                 runnerName: "runner", policy: .default, now: now
             )
             XCTAssertEqual(FleetSlotRules.deadline(in: context)?.trip, state == .registered ? .lifetimeExceeded : nil)
         }
         let stale = FleetSlotRules.DeadlineContext(
-            state: .registered, stateEnteredAt: now, cycleStartedAt: now.addingTimeInterval(-20_000),
-            bootstrappedAt: now, lastObservation: (.online(id: 1, isBusy: false), now.addingTimeInterval(-30)),
+            state: .registered, stateEnteredAt: now, cycleStartedAt: now.earlier(by: 20_000),
+            bootstrappedAt: now, lastObservation: (.online(id: 1, isBusy: false), now.earlier(by: 30)),
             runnerName: "runner", policy: .default, now: now
         )
         XCTAssertNil(FleetSlotRules.deadline(in: stale), "an API outage cannot authorize an idle recycle")
+        // A clone that has existed for 20 000 s of wall time but only 10 000 s of awake time is
+        // under the cap: the host's sleep is not the guest's age.
+        let slept = FleetSlotRules.DeadlineContext(
+            state: .registered, stateEnteredAt: now,
+            cycleStartedAt: FleetInstant(date: now.date.addingTimeInterval(-20_000), uptime: now.uptime - 10_000),
+            bootstrappedAt: now, lastObservation: (.online(id: 1, isBusy: false), now),
+            runnerName: "runner", policy: .default, now: now
+        )
+        XCTAssertNil(FleetSlotRules.deadline(in: slept), "host sleep does not age a clone")
     }
 
     func testDefaults() {
@@ -98,5 +107,12 @@ final class FleetSlotPolicyTests: XCTestCase {
             )
             XCTAssertEqual(policy.shutdownTimeout, .seconds(600))
         }
+    }
+}
+
+private extension FleetInstant {
+    /// The same clock `seconds` earlier, awake the whole time.
+    func earlier(by seconds: TimeInterval) -> FleetInstant {
+        FleetInstant(date: date.addingTimeInterval(-seconds), uptime: uptime - seconds)
     }
 }

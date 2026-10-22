@@ -18,6 +18,7 @@ public final class VirtualMachineFleet {
     private let guestLogReader: VirtualMachineGuestLogReader?
     private let policy: FleetSlotPolicy
     private let clock: FleetClock
+    private let hostSleepPrevention: HostSleepPrevention
     private var isTerminating = false
     @ObservationIgnored
     private var activeTasks: [String: (id: UUID, task: Task<(), Never>)] = [:]
@@ -30,7 +31,8 @@ public final class VirtualMachineFleet {
         identityReader: GuestRunnerIdentityReader,
         guestLogReader: VirtualMachineGuestLogReader? = nil,
         policy: FleetSlotPolicy = .default,
-        clock: FleetClock = SystemFleetClock()
+        clock: FleetClock = SystemFleetClock(),
+        hostSleepPrevention: HostSleepPrevention = NoHostSleepPrevention()
     ) {
         self.logger = logger
         self.baseVirtualMachine = baseVirtualMachine
@@ -40,6 +42,7 @@ public final class VirtualMachineFleet {
         self.guestLogReader = guestLogReader
         self.policy = policy
         self.clock = clock
+        self.hostSleepPrevention = hostSleepPrevention
     }
 
     public func start(numberOfMachines: Int) {
@@ -52,6 +55,7 @@ public final class VirtualMachineFleet {
         isStarted = true
         isStopping = false
         slotStatuses = []
+        hostSleepPrevention.begin(reason: "Tartelet is running \(numberOfMachines) GitHub Actions runner VM(s)")
         for index in 0 ..< numberOfMachines {
             let name = baseVirtualMachine.name + "-\(index + 1)"
             startSlot(named: name)
@@ -66,6 +70,7 @@ public final class VirtualMachineFleet {
         if activeTasks.isEmpty {
             isStarted = false
             slotStatuses = []
+            hostSleepPrevention.end()
         }
     }
 

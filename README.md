@@ -48,6 +48,10 @@ Each slot moves through an explicit state machine: `idle → cloning → booting
 | `draining` | `tart run` must return after unregistering, going offline, or becoming idle after being busy | 3 min | `TARTELET_SHUTDOWN_TIMEOUT` |
 | `registered` (idle) | recycle after clone-age cap, with a fresh idle observation | 3 h | `TARTELET_MAX_LIFETIME` |
 
+Deadlines count the host's **awake** time (`ProcessInfo.systemUptime`, which stands still in sleep), never wall-clock time: a sleep gap is not boot, registration or shutdown time the guest could have used, and every transition and deadline log names the time the host slept in that state. On 2026-10-21/22 a lid-closed host that only dark-woke for seconds at a time tripped a 5-minute boot deadline after "16m03s in booting" and force-stopped guests that were running jobs.
+
+**A busy guest is never force-stopped by a deadline.** Recovery releases the registration through GitHub before it stops anything, and GitHub refuses to delete a runner that is running a job (HTTP 422). A deadline-triggered recovery treats that refusal as the truth: the guest is kept, the slot moves to `busy` with the refused id as its identity, and the watchdog polls on; a later deadline can still recover it. Stop, Quit and a failed bootstrap do not keep a busy guest.
+
 Two more knobs tune the cadence: `TARTELET_RUNNER_POLL_INTERVAL` (default 30 s) sets how often the runner list is polled, and `TARTELET_RETRY_DELAY` (default 10 s) is the pause after a failed cycle or an unsuccessful pre-clone identity request. All values are positive whole seconds; invalid environment values are ignored. Each variable falls back to a `UserDefaults` key with the same meaning (`bootTimeout`, `registrationTimeout`, `shutdownTimeout`, `maxLifetime`, `runnerPollInterval`, `retryDelay`) and then to the default. A failed API request does not supply evidence for the registration deadline. That deadline requires a successful request started at or after the registration timeout; a slow earlier request does not qualify. Boot and draining deadlines continue during API outages; lifetime recycling requires a fresh idle observation. Before cloning, the slot requires a successful runner-list baseline for cleanup if bootstrap fails, including after an app restart. An API outage therefore postpones new cycles. Bootstrap atomically publishes a copy of `~/actions-runner/.runner` after `config.sh` succeeds; the host reads its `agentId` over SSH. Only that guest-reported id can register the slot or mark it busy. `--replace` may reuse the previous id while its listener session is still live; reuse is accepted, and mismatched ids are ignored. Runner-list pagination uses 100 runners per page in both scopes; a failure or a remaining next page after 50 pages makes the whole observation fail. Installation tokens are cached for 45 minutes and discarded on request failure.
 
 **The 3-hour cap recycles only idle, registered guests.** It includes cloning, boot and idle time, but never fires while busy or waiting for registration. The cap is retained as configurable idle maintenance; every recycle releases the registration before stopping. A previously online runner going offline enters `draining` even if no busy poll was observed. It can return to `registered` if it comes back idle and has never been observed busy; after being busy, repeated idle polls do not reset the draining deadline.
@@ -71,6 +75,19 @@ Stop Immediately, ordinary Quit and SSH bootstrap failure use the same bounded r
 Stop Immediately keeps the fleet unavailable for restart until cleanup finishes. Ordinary Quit waits for that cleanup before taking the final process-registry snapshot. Forced termination of the app cannot await cleanup; the next launch recovers marked leftovers. Every state transition and deadline trip is logged with the slot and elapsed time. Unchanged runner observations are quiet; stale IDs are logged once per cycle, API failures at most once per five minutes per slot, and recovery from an API outage once. The menu bar lists each slot's current state.
 
 Inside the guest, the runner script's `EXIT` trap now kills the runner's process tree and any simulator or `xcodebuild` a cancelled job left behind before requesting `sudo shutdown -h now`, and falls back to `sudo halt -q` if the shutdown has not completed within 90 seconds.
+
+## 💤 Host sleep
+
+While the fleet runs, Tartelet holds a `PreventSystemSleep` power assertion (`pmset -g assertions` lists it under the app). On AC power that prevents idle and maintenance sleep and keeps a host that has dark-woken awake for as long as a guest is running, so a job taken during a Power Nap or TCP keep-alive wake is not lost when the host would otherwise doze off again. Full sleeps and wakes are written to the fleet log with the time asleep.
+
+No assertion prevents the sleep that closing a MacBook's lid starts, and idle-sleep assertions (Amphetamine, caffeinate without `-s`) cover neither case. A laptop host that runs with its lid closed needs:
+
+```sh
+sudo pmset -a disablesleep 1
+sudo pmset -a standby 0 powernap 0 sleep 0
+```
+
+Verify with `pmset -g` (`SleepDisabled 1`) and, after a day, `pmset -g log | grep -c "Entering Sleep"` returning `0`. "Clamshell Sleep" followed by repeating "DarkWake … Maintenance Sleep" pairs in that log is a host that is taking jobs it cannot finish.
 
 ## 🏎 How is the performance?
 

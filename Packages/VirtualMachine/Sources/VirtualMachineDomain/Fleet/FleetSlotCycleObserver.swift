@@ -14,7 +14,7 @@ final class FleetSlotCycleObserver: VirtualMachineStartObserver, @unchecked Send
     }
 
     func virtualMachineWillStop(_ virtualMachine: VirtualMachine) async {
-        await stopper.stop(reason: "bootstrap failed; releasing registration before stopping")
+        await stopper.stop(.termination("bootstrap failed; releasing registration before stopping"))
     }
 
     func virtualMachineDidBootstrap(_ virtualMachine: VirtualMachine) {

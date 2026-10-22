@@ -109,6 +109,10 @@ public final class NetworkingGitHubClient: GitHubClient {
         if response.httpURLResponse?.statusCode == 404 {
             return
         }
+        // GitHub answers 422 ("Runner … is still running a job") instead of deleting a busy runner.
+        if response.httpURLResponse?.statusCode == 422 {
+            throw GitHubRunnerBusyError(id: id)
+        }
         _ = try response.map(\.value)
     }
 
