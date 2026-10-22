@@ -1,3 +1,6 @@
+// swiftlint:disable file_length
+// The slot owns every piece of lock-guarded cycle state, so its bookkeeping cannot move to another
+// file without widening that state's access; splitting it into a ledger type is the follow-up.
 import Foundation
 import LoggingDomain
 
@@ -26,12 +29,12 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
 
     private let lock = NSLock()
     private var state: FleetSlotState = .idle
-    private var stateEnteredAt: Date
-    private var cycleStartedAt: Date?
+    private var stateEnteredAt: FleetInstant
+    private var cycleStartedAt: FleetInstant?
     private var cycleID = UUID()
-    private var bootstrappedAt: Date?
+    private var bootstrappedAt: FleetInstant?
     private var hasBeenBusy = false
-    private var lastObservation: (status: GitHubActionsRunnerStatus, at: Date)?
+    private var lastObservation: (status: GitHubActionsRunnerStatus, at: FleetInstant)?
     private var runnerIdentity = FleetRunnerIdentity()
     private var revision: UInt64 = 0
 
@@ -63,13 +66,13 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
         self.clock = clock
         self.logger = logger
         self.statusDidChange = statusDidChange
-        self.stateEnteredAt = clock.now
+        self.stateEnteredAt = clock.instant
     }
 
     /// Runs cycles until cancelled, or until `shouldStopAfterCycle` returns `true` between cycles.
     public func run(shouldStopAfterCycle: @escaping @Sendable () async -> Bool) async {
         log(
-            "slot started for runner \"\(runnerName)\"; deadlines: boot \(format(policy.bootTimeout)),"
+            "slot started for runner \"\(runnerName)\"; deadlines (awake time): boot \(format(policy.bootTimeout)),"
             + " registration \(format(policy.registrationTimeout)), shutdown \(format(policy.shutdownTimeout)),"
             + " lifetime \(format(policy.maximumLifetime)); polling every \(format(policy.pollInterval))"
         )
@@ -150,7 +153,7 @@ public final class VirtualMachineFleetSlot: @unchecked Sendable {
 private extension VirtualMachineFleetSlot {
     private func beginCycle(baselineID: Int?) {
         lock.withLock {
-            cycleStartedAt = clock.now
+            cycleStartedAt = clock.instant
             cycleID = UUID()
             bootstrappedAt = nil
             hasBeenBusy = false
@@ -162,8 +165,8 @@ private extension VirtualMachineFleetSlot {
 
     private func runVirtualMachine(_ virtualMachine: VirtualMachine) async -> CycleOutcome {
         transition(to: .booting)
-        let stopper = FleetGuestStopper { reason in
-            await self.recover(virtualMachine, reason: reason)
+        let stopper = FleetGuestStopper { request in
+            await self.recover(virtualMachine, request: request)
         }
         let observer = FleetSlotCycleObserver(slot: self, cycleID: lock.withLock { cycleID }, stopper: stopper)
         var exitResult: Result<Void, Error>?
@@ -239,7 +242,7 @@ private extension VirtualMachineFleetSlot {
                 return false
             }
             if needsObservation { await readGuestIdentity(virtualMachine) }
-            let observationStartedAt = clock.now
+            let observationStartedAt = clock.instant
             if needsObservation, let observation = await runnerObserver.read() {
                 // A slow pre-deadline request is not evidence of the runner's state after the
                 // deadline. Conservatively date successful observations at request start.
@@ -249,10 +252,17 @@ private extension VirtualMachineFleetSlot {
             if Task.isCancelled {
                 return false
             }
-            if let deadline = trippedDeadline(at: clock.now) {
+            if let deadline = trippedDeadline(at: clock.instant) {
                 // .exited cancels this watcher when tart stop succeeds. Recovery is already
                 // committed at this point and must finish helper cleanup before the group exits.
-                await stopper.stop(reason: "\(deadline.trip) deadline tripped: \(deadline.detail)")
+                let outcome = await stopper.stop(
+                    .deadline("\(deadline.trip) deadline tripped: \(deadline.detail)")
+                )
+                // GitHub knows better than a deadline: a guest it still lists as running a job is
+                // kept, and the watchdog carries on polling it as busy.
+                guard outcome == .stopped else {
+                    continue
+                }
                 return true
             }
         }
@@ -269,7 +279,7 @@ private extension VirtualMachineFleetSlot {
         }
     }
 
-    private func apply(_ rawObservation: GitHubActionsRunnerStatus, at now: Date) {
+    private func apply(_ rawObservation: GitHubActionsRunnerStatus, at now: FleetInstant) {
         let (state, hasBeenBusy, application) = lock.withLock {
             if let id = rawObservation.id { lastKnownRunnerID = id }
             let application = runnerIdentity.observe(rawObservation)
@@ -291,7 +301,7 @@ private extension VirtualMachineFleetSlot {
         transition(to: next.state, from: state, reason: next.reason)
     }
 
-    private func trippedDeadline(at now: Date) -> FleetSlotRules.Deadline? {
+    private func trippedDeadline(at now: FleetInstant) -> FleetSlotRules.Deadline? {
         let context: FleetSlotRules.DeadlineContext? = lock.withLock {
             guard let cycleStartedAt else {
                 return nil
@@ -327,12 +337,38 @@ private extension VirtualMachineFleetSlot {
         }
     }
 
-    private func recover(_ virtualMachine: VirtualMachine, reason: String) async {
-        transition(to: .recovering, reason: reason)
+    private func recover(
+        _ virtualMachine: VirtualMachine, request: FleetGuestStopRequest
+    ) async -> FleetGuestRecovery.Outcome {
+        transition(to: .recovering, reason: request.reason)
         let (guestID, observedID) = lock.withLock { (runnerIdentity.current, lastKnownRunnerID) }
-        await recovery.stop(virtualMachine, guestID: guestID, observedID: observedID)
+        let outcome = await recovery.stop(
+            virtualMachine, guestID: guestID, observedID: observedID, keepsBusyGuest: request.keepsBusyGuest
+        )
+        if case let .keptBusyGuest(id) = outcome {
+            keepBusyGuest(id: id)
+        }
+        return outcome
     }
 
+    /// GitHub refused to release `id` because it is running a job: the deadline was wrong about
+    /// this guest. Adopt the id as the guest's identity if bootstrap never reported one, record
+    /// the busy observation, and poll on from `busy`.
+    private func keepBusyGuest(id: Int) {
+        let now = clock.instant
+        lock.withLock {
+            if runnerIdentity.current == nil {
+                runnerIdentity.report(id: id)
+            }
+            lastKnownRunnerID = id
+            lastObservation = (.online(id: id, isBusy: true), now)
+        }
+        transition(
+            to: .busy,
+            from: .recovering,
+            reason: "GitHub refused to release runner id \(id): it is running a job; keeping the guest"
+        )
+    }
 }
 
 // MARK: - State bookkeeping
@@ -345,14 +381,15 @@ private extension VirtualMachineFleetSlot {
         cycleID expectedCycleID: UUID? = nil,
         reason: String? = nil
     ) {
-        let now = clock.now
+        let now = clock.instant
         let result: (status: VirtualMachineFleetSlotStatus, message: String)? = lock.withLock {
             guard newState != state, from == nil || from == state,
                   expectedCycleID == nil || expectedCycleID == cycleID else {
                 return nil
             }
             let previousState = state
-            let timeInPreviousState = now.timeIntervalSince(stateEnteredAt)
+            let timeInPreviousState = now.awakeTime(since: stateEnteredAt)
+            let asleepInPreviousState = now.timeAsleep(since: stateEnteredAt)
             state = newState
             revision += 1
             stateEnteredAt = now
@@ -364,8 +401,11 @@ private extension VirtualMachineFleetSlot {
             }
             var message = "\(previousState.rawValue) -> \(newState.rawValue)"
             message += " (\(format(timeInPreviousState)) in \(previousState.rawValue)"
+            if asleepInPreviousState >= 1 {
+                message += ", host asleep \(format(asleepInPreviousState)) of it"
+            }
             if let cycleStartedAt {
-                message += ", \(format(now.timeIntervalSince(cycleStartedAt))) since clone started"
+                message += ", \(format(now.awakeTime(since: cycleStartedAt))) since clone started"
             }
             message += ")"
             if let reason {
@@ -388,8 +428,8 @@ private extension VirtualMachineFleetSlot {
             name: name,
             runnerName: runnerName,
             state: state,
-            stateEnteredAt: stateEnteredAt,
-            cycleStartedAt: cycleStartedAt,
+            stateEnteredAt: stateEnteredAt.date,
+            cycleStartedAt: cycleStartedAt?.date,
             revision: revision
         )
     }

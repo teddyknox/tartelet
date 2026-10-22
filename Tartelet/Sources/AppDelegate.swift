@@ -20,6 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSApplication.shared.terminate(nil)
         }
         beginObservingAppIconVisibility()
+        Composers.hostSleepObserver.start()
         if Composers.settingsStore.startVirtualMachinesOnLaunch {
             Composers.fleet.start(numberOfMachines: Composers.settingsStore.numberOfVirtualMachines)
         }

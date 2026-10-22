@@ -67,14 +67,18 @@ final class RunnerPaginationTests: XCTestCase {
             (GitHubRunnerScope.organization, "/orgs/org/actions/runners/12118"),
             (.repo, "/repos/owner/repo/actions/runners/12118")
         ] {
-            for status in [204, 404, 403] {
+            for status in [204, 404, 403, 422] {
                 let network = PageNetwork { _, _ in
                     PageReply(data: Data(), error: status == 204 ? nil : TestError(), status: status)
                 }
                 let client = NetworkingGitHubClient(credentialsStore: Credentials(), networkingService: network)
                 do {
                     try await client.deleteRunner(id: 12_118, with: GitHubAppAccessToken("test"), runnerScope: scope)
-                    XCTAssertNotEqual(status, 403)
+                    XCTAssertTrue(status == 204 || status == 404)
+                } catch let busy as GitHubRunnerBusyError {
+                    // 422 means the runner is still running a job; the caller must know that.
+                    XCTAssertEqual(status, 422)
+                    XCTAssertEqual(busy.id, 12_118)
                 } catch { XCTAssertEqual(status, 403) }
                 XCTAssertEqual(network.requests.first?.httpMethod, "DELETE")
                 XCTAssertEqual(network.requests.first?.url?.path, path)

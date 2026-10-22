@@ -54,8 +54,11 @@ enum Composers {
         guestLogReader: SSHVirtualMachineGuestLogReader(
             sshClient: virtualMachineSSHClient
         ),
-        policy: fleetPolicy
+        policy: fleetPolicy,
+        hostSleepPrevention: IOKitHostSleepPrevention(logger: logger(subsystem: "VirtualMachineFleet"))
     )
+
+    static let hostSleepObserver = HostSleepObserver(logger: logger(subsystem: "VirtualMachineFleet"))
 
     static let editor = VirtualMachineEditor(
         logger: logger(subsystem: "VirtualMachineEditor"),

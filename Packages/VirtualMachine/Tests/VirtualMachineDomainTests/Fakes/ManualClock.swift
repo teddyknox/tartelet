@@ -1,7 +1,8 @@
 import Foundation
 import VirtualMachineDomain
 
-/// A clock the test advances by hand. Sleepers wake when `now` reaches their deadline.
+/// A clock the test advances by hand. Sleepers wake when `now` reaches their deadline. `advance`
+/// moves awake time and wall time together; `hostSleeps(for:)` moves wall time alone.
 final class ManualClock: FleetClock, @unchecked Sendable {
     private struct Sleeper {
         let id: UUID
@@ -11,6 +12,7 @@ final class ManualClock: FleetClock, @unchecked Sendable {
 
     private let lock = NSLock()
     private var currentNow: Date
+    private var currentUptime: TimeInterval = 10_000
     private var sleepers: [Sleeper] = []
     private var registrations: UInt64 = 0
 
@@ -22,6 +24,10 @@ final class ManualClock: FleetClock, @unchecked Sendable {
 
     var now: Date {
         lock.withLock { currentNow }
+    }
+
+    var uptime: TimeInterval {
+        lock.withLock { currentUptime }
     }
 
     var sleeperCount: Int {
@@ -64,6 +70,20 @@ final class ManualClock: FleetClock, @unchecked Sendable {
     func advance(by seconds: TimeInterval) {
         lock.lock()
         currentNow = currentNow.addingTimeInterval(seconds)
+        currentUptime += seconds
+        let due = sleepers.filter { $0.wakeAt <= currentNow }
+        sleepers.removeAll { $0.wakeAt <= currentNow }
+        lock.unlock()
+        for sleeper in due.sorted(by: { $0.wakeAt < $1.wakeAt }) {
+            sleeper.continuation.resume()
+        }
+    }
+
+    /// The host sleeps for `seconds`: wall time passes, awake time does not. Like `Task.sleep` on
+    /// a real host, sleepers whose wall-clock deadline passed wake up when the host does.
+    func hostSleeps(for seconds: TimeInterval) {
+        lock.lock()
+        currentNow = currentNow.addingTimeInterval(seconds)
         let due = sleepers.filter { $0.wakeAt <= currentNow }
         sleepers.removeAll { $0.wakeAt <= currentNow }
         lock.unlock()
@@ -85,6 +105,7 @@ final class ManualClock: FleetClock, @unchecked Sendable {
                 }
                 let generation = registrations
                 currentNow = currentNow.addingTimeInterval(seconds)
+                currentUptime += seconds
                 let due = sleepers.filter { $0.wakeAt <= currentNow }
                 sleepers.removeAll { $0.wakeAt <= currentNow }
                 return (generation, due)
